@@ -31,8 +31,8 @@ def main():
 
 def ask_source():
     return {
-        "name": ask("Name", "RBC Trends Fintech"),
-        "url": ask("URL", "https://trends.rbc.ru/trends/tag/fintech"),
+        "name": ask("Name", "Альфа-Банк: новости"),
+        "url": ask("URL", "https://alfabank.ru/news/t/"),
         "source_type": ask("Source type", "site"),
         "is_active": confirm("Is active?", True),
         "parse_frequency_minutes": ask_int("Parse frequency minutes", 60),

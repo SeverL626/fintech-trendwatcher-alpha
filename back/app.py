@@ -18,7 +18,7 @@ def hello():
     return jsonify({
         "ok": True,
         "message": "Welcom to main page of the Alfa-HackItOn backend!",
-        "routes": ["/parser", "/tests/all", "/tests/db"],
+        "routes": ["/parser", "/parser/source/<id>", "/tests/all", "/tests/db"],
     })
 
 
@@ -28,6 +28,15 @@ def run_parser():
         "ok": True,
         "parser": run_parser_from_db(app.config["DB_PATH"]),
     })
+
+
+@app.route("/parser/source/<int:source_id>")
+def run_parser_for_source(source_id):
+    result = run_parser_for_source_id(app.config["DB_PATH"], source_id)
+    return jsonify({
+        "ok": "error" not in result,
+        "parser": result,
+    }), 200 if "error" not in result else 404
 
 
 @app.route("/tests/all")
@@ -62,6 +71,15 @@ def run_parser_from_db(db_path):
         from parser import run_parser_from_db as parser_runner
 
     return parser_runner(db_path)
+
+
+def run_parser_for_source_id(db_path, source_id):
+    try:
+        from back.parser import run_parser_for_source_id as parser_runner
+    except ModuleNotFoundError:
+        from parser import run_parser_for_source_id as parser_runner
+
+    return parser_runner(db_path, source_id)
 
 
 if __name__ == "__main__":

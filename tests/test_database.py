@@ -190,28 +190,44 @@ class DatabaseTest(unittest.TestCase):
             self.assertIn("idx_raw_news_status", indexes)
             self.assertIn("idx_raw_news_content_hash", indexes)
 
-    def test_initial_source_is_seeded_with_parser_config(self):
+    def test_initial_sources_are_seeded_with_parser_config(self):
         init_db(self.db_path, seed_initial_source=True)
 
         with connect_db(self.db_path) as db:
-            source = db.execute("""
-                SELECT id, name, url, parser_config
+            sources = db.execute("""
+                SELECT id, name, url, source_type, is_active, parser_config
                 FROM sources
-                WHERE id = 1
-            """).fetchone()
+                ORDER BY id
+            """).fetchall()
 
-        config = json.loads(source["parser_config"])
-        self.assertEqual(source["id"], 1)
-        self.assertEqual(source["name"], "RBC Trends Fintech")
-        self.assertEqual(source["url"], "https://trends.rbc.ru/trends/tag/fintech")
-        self.assertEqual(config["max_age_days"], 2)
-        self.assertEqual(config["link_selector"], "a.g-inline-text-badges.js-item-link")
-        self.assertIsNone(config["date_selectors"])
-        self.assertEqual(config["text_selector"], "article p")
-        self.assertEqual(config["pause"], 0.5)
-        self.assertEqual(config["timeout"], 15)
-        self.assertTrue(config["use_fallback_date_search"])
-        self.assertIsNone(config["date_formats"])
+        self.assertEqual(len(sources), 12)
+
+        cbr = sources[0]
+        cbr_config = json.loads(cbr["parser_config"])
+        self.assertEqual(cbr["id"], 1)
+        self.assertEqual(cbr["name"], "Банк России: новости")
+        self.assertEqual(cbr["url"], "https://www.cbr.ru/scripts/XML_News.asp")
+        self.assertEqual(cbr["source_type"], "api")
+        self.assertEqual(cbr_config["kind"], "xml")
+        self.assertEqual(cbr_config["max_age_days"], 3)
+
+        rbc = sources[8]
+        rbc_config = json.loads(rbc["parser_config"])
+        self.assertEqual(rbc["id"], 9)
+        self.assertEqual(rbc["name"], "РБК RSS")
+        self.assertEqual(rbc["source_type"], "rss")
+        self.assertEqual(rbc_config["kind"], "rss")
+        self.assertEqual(rbc_config["max_age_days"], 3)
+
+        rosstat = sources[2]
+        rosstat_config = json.loads(rosstat["parser_config"])
+        self.assertEqual(rosstat["id"], 3)
+        self.assertEqual(rosstat_config["kind"], "html_files")
+        self.assertFalse(rosstat_config["verify_ssl"])
+
+        yandex = sources[11]
+        self.assertEqual(yandex["id"], 12)
+        self.assertEqual(yandex["is_active"], 0)
 
     def _insert_source(self, db):
         cursor = db.execute("""

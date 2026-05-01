@@ -11,25 +11,229 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "app.db"
 DB_PATH = Path(os.getenv("DB_PATH", DEFAULT_DB_PATH))
 
 
-INITIAL_SOURCE = {
-    "id": 1,
-    "name": "RBC Trends Fintech",
-    "url": "https://trends.rbc.ru/trends/tag/fintech",
-    "source_type": "site",
-    "is_active": 1,
-    "parse_frequency_minutes": 60,
-    "parser_config": {
-        "max_age_days": 2,
-        "link_selector": "a.g-inline-text-badges.js-item-link",
-        "date_selectors": None,
-        "text_selector": "article p",
-        "pause": 0.5,
-        "timeout": 15,
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "use_fallback_date_search": True,
-        "date_formats": None,
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
+
+INITIAL_SOURCES = [
+    {
+        "id": 1,
+        "name": "Банк России: новости",
+        "url": "https://www.cbr.ru/scripts/XML_News.asp",
+        "source_type": "api",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "xml",
+            "max_age_days": 3,
+            "item_tags": ["News", "Item", "Record"],
+            "title_fields": ["Title", "title", "Name", "name"],
+            "url_fields": ["Url", "URL", "Link", "link"],
+            "date_fields": ["Date", "date", "DateTime", "pubDate"],
+            "text_fields": ["Text", "text", "Description", "description"],
+            "url_prefix": "https://www.cbr.ru",
+        },
     },
-}
+    {
+        "id": 2,
+        "name": "Минфин России: пресс-центр",
+        "url": "https://minfin.gov.ru/ru/press-center/",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "html",
+            "max_age_days": 3,
+            "link_selector": "a[href*='press-center'], a[href*='id_4=']",
+            "date_selectors": [
+                "meta[property='article:published_time']",
+                "time[datetime]",
+                ".date",
+            ],
+            "text_selector": "article p, main p",
+            "pause": 0.5,
+            "timeout": 15,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 3,
+        "name": "Росстат: национальные счета",
+        "url": "https://rosstat.gov.ru/statistics/accounts",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "html_files",
+            "max_age_days": 3,
+            "file_extensions": [".xls", ".xlsx", ".csv", ".zip"],
+            "link_selector": "a[href]",
+            "url_contains": ["/storage/mediabank/"],
+            "timeout": 20,
+            "user_agent": DEFAULT_USER_AGENT,
+            "verify_ssl": False,
+        },
+    },
+    {
+        "id": 4,
+        "name": "MOEX ISS shares",
+        "url": "https://iss.moex.com/iss/engines/stock/markets/shares/securities.json",
+        "source_type": "api",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "json",
+            "max_age_days": 3,
+            "max_items": 50,
+            "timeout": 20,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 5,
+        "name": "Альфа-Банк: новости",
+        "url": "https://alfabank.ru/news/t/",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "html",
+            "max_age_days": 3,
+            "link_selector": "main a[href*='/news/t/'], a[href*='/news/t/']",
+            "date_selectors": [
+                "meta[property='article:published_time']",
+                "time[datetime]",
+                "time",
+            ],
+            "text_selector": "article p, main p",
+            "pause": 0.5,
+            "timeout": 15,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 6,
+        "name": "Сбер: пресс-релизы",
+        "url": "https://www.sberbank.com/ru/news-and-media/press-releases",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "html_files",
+            "max_age_days": 3,
+            "link_selector": "a[href]",
+            "url_contains": ["/news-and-media/", "/investor-relations/"],
+            "file_extensions": [".pdf", ".html"],
+            "timeout": 20,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 7,
+        "name": "Т-Банк: новости",
+        "url": "https://www.tbank.ru/about/news/",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "html",
+            "max_age_days": 3,
+            "link_selector": "main a[href*='/about/news/'], a[href*='/about/news/']",
+            "date_selectors": [
+                "meta[property='article:published_time']",
+                "time[datetime]",
+                "time",
+            ],
+            "text_selector": "article p, main p",
+            "pause": 0.5,
+            "timeout": 15,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 8,
+        "name": "ВТБ: пресс-центр и IR",
+        "url": "https://www.vtb.com/about/press-center/",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "html_files",
+            "max_age_days": 3,
+            "link_selector": "a[href]",
+            "url_contains": ["/about/press-center/", "/ir/"],
+            "file_extensions": [".pdf", ".xlsx", ".xls", ".html"],
+            "timeout": 20,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 9,
+        "name": "РБК RSS",
+        "url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
+        "source_type": "rss",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "rss",
+            "max_age_days": 3,
+            "timeout": 15,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 10,
+        "name": "Ведомости RSS: банки",
+        "url": "https://www.vedomosti.ru/rss/rubric/finance/banks",
+        "source_type": "rss",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "rss",
+            "max_age_days": 3,
+            "timeout": 15,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 11,
+        "name": "Коммерсантъ: архив новостей",
+        "url": "https://www.kommersant.ru/archive/news",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "html",
+            "max_age_days": 3,
+            "link_selector": "a[href^='/doc/'], a[href*='/doc/']",
+            "date_selectors": [
+                "meta[property='article:published_time']",
+                "time[datetime]",
+                "time",
+            ],
+            "text_selector": "article p, main p",
+            "pause": 0.5,
+            "timeout": 15,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
+    {
+        "id": 12,
+        "name": "Yandex Search API discovery",
+        "url": "https://searchapi.api.cloud.yandex.net/v2/web/searchAsync",
+        "source_type": "api",
+        "is_active": 0,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "kind": "yandex_search",
+            "max_age_days": 3,
+            "query_text": "Банк России OR Минфин OR Мосбиржа fintech банк",
+            "requires_env": ["YANDEX_API_KEY", "YANDEX_FOLDER_ID"],
+        },
+    },
+]
 
 
 SCHEMA_SQL = """
@@ -108,7 +312,7 @@ def init_db(db_path: str | Path | None = None, seed_initial_source: bool = True)
         connection.executescript(SCHEMA_SQL)
         ensure_column(connection, "sources", "parser_config", "TEXT")
         if seed_initial_source:
-            seed_source(connection)
+            seed_sources(connection)
         connection.commit()
 
 
@@ -121,7 +325,12 @@ def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: 
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
-def seed_source(connection: sqlite3.Connection) -> None:
+def seed_sources(connection: sqlite3.Connection) -> None:
+    for source in INITIAL_SOURCES:
+        seed_source(connection, source)
+
+
+def seed_source(connection: sqlite3.Connection, source: dict) -> None:
     connection.execute("""
         INSERT INTO sources (
             id,
@@ -141,13 +350,13 @@ def seed_source(connection: sqlite3.Connection) -> None:
             parse_frequency_minutes = excluded.parse_frequency_minutes,
             parser_config = excluded.parser_config
     """, (
-        INITIAL_SOURCE["id"],
-        INITIAL_SOURCE["name"],
-        INITIAL_SOURCE["url"],
-        INITIAL_SOURCE["source_type"],
-        INITIAL_SOURCE["is_active"],
-        INITIAL_SOURCE["parse_frequency_minutes"],
-        json.dumps(INITIAL_SOURCE["parser_config"], ensure_ascii=False),
+        source["id"],
+        source["name"],
+        source["url"],
+        source["source_type"],
+        source["is_active"],
+        source["parse_frequency_minutes"],
+        json.dumps(source["parser_config"], ensure_ascii=False),
     ))
 
 

@@ -23,7 +23,7 @@ class AppRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["routes"], ["/parser", "/tests/all", "/tests/db"])
+        self.assertEqual(payload["routes"], ["/parser", "/parser/source/<id>", "/tests/all", "/tests/db"])
 
     def test_parser_route_runs_parser(self):
         original = app_module.run_parser_from_db
@@ -42,6 +42,26 @@ class AppRoutesTest(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["parser"]["created"], 2)
+
+    def test_parser_source_route_runs_single_source_parser(self):
+        original = app_module.run_parser_for_source_id
+        app_module.run_parser_for_source_id = lambda _db_path, source_id: {
+            "sources": 1,
+            "created": 1,
+            "skipped": 0,
+            "summary": [f"source {source_id}: найдено 1"],
+            "results": [],
+        }
+        try:
+            response = self.client.get("/parser/source/9")
+        finally:
+            app_module.run_parser_for_source_id = original
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["parser"]["created"], 1)
+        self.assertIn("source 9", payload["parser"]["summary"][0])
 
     def test_test_routes_run_unittest(self):
         response = self.client.get("/tests/db")
