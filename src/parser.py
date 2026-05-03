@@ -6,6 +6,7 @@ from dateparser.search import search_dates
 from datetime import datetime, timedelta
 import time
 from urllib.parse import urljoin
+from random import uniform
 
 
 class NewsParser:
@@ -50,14 +51,25 @@ class NewsParser:
 
         self.age_limit = datetime.now() - timedelta(days=max_age_days)
 
-    def _fetch_page(self, url):
-        try:
-            resp = requests.get(url, headers=self.headers, timeout=self.timeout)
-            resp.raise_for_status()
-            return BeautifulSoup(resp.text, "lxml")
-        except Exception as e:
-            print(f"Ошибка загрузки {url}: {e}")
-            return None
+    def _fetch_page(self, url, max_retries=3, backoff_factor=1.5):
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(url, headers=self.headers, timeout=self.timeout)
+                resp.raise_for_status()
+                return BeautifulSoup(resp.text, "lxml")
+            except requests.exceptions.HTTPError as e:
+                print(f"HTTP ошибка при загрузке {url}: {e}. Попытка {attempt + 1}/{max_retries}")
+                if e.response.status_code == 406:
+                    wait_time = backoff_factor ** attempt + uniform(0, 1) * 5
+                    print(f"Ожидаем {wait_time:.2f} сек. перед повтором...")
+                    time.sleep(wait_time)
+                else:
+                    return None
+            except Exception as e:
+                print(f"Ошибка при загрузке {url}: {e}. Попытка {attempt + 1}/{max_retries}")
+                time.sleep(backoff_factor ** attempt)
+        print(f"Не удалось загрузить {url} после {max_retries} попыток.")
+        return None
 
     def _extract_date(self, soup):
         for sel in self.date_selectors:
