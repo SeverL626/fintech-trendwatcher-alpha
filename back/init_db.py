@@ -15,25 +15,22 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
-
-
+PARSE_WINDOW_DAYS = 1
+PARSE_WINDOW_HOURS = 24
+RAW_NEWS_RETENTION_DAYS = 7
+MAX_FUTURE_HOURS = 2
+MIN_TEXT_LENGTH = 80
 INITIAL_SOURCES = [
     {
         "id": 1,
-        "name": "Банк России: новости",
-        "url": "https://www.cbr.ru/scripts/XML_News.asp",
-        "source_type": "api",
+        "name": "Банк России: новости, интервью, выступления",
+        "url": "https://www.cbr.ru/rss/eventrss",
+        "source_type": "rss",
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "xml",
-            "max_age_days": 3,
-            "item_tags": ["News", "Item", "Record"],
-            "title_fields": ["Title", "title", "Name", "name"],
-            "url_fields": ["Url", "URL", "Link", "link"],
-            "date_fields": ["Date", "date", "DateTime", "pubDate"],
-            "text_fields": ["Text", "text", "Description", "description"],
-            "url_prefix": "https://www.cbr.ru",
+            "connector": "cbr",
+            "max_age_days": PARSE_WINDOW_DAYS,
         },
     },
     {
@@ -44,8 +41,8 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "html",
-            "max_age_days": 3,
+            "connector": "minfin",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "link_selector": "a[href*='press-center'], a[href*='id_4=']",
             "date_selectors": [
                 "meta[property='article:published_time']",
@@ -66,9 +63,9 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "html_files",
-            "max_age_days": 3,
-            "file_extensions": [".xls", ".xlsx", ".csv", ".zip"],
+            "connector": "rosstat",
+            "max_age_days": PARSE_WINDOW_DAYS,
+            "file_extensions": [".xls", ".xlsx", ".csv", ".zip", ".pdf", ".doc", ".docx"],
             "link_selector": "a[href]",
             "url_contains": ["/storage/mediabank/"],
             "timeout": 20,
@@ -84,8 +81,8 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "json",
-            "max_age_days": 3,
+            "connector": "moex",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "max_items": 50,
             "timeout": 20,
             "user_agent": DEFAULT_USER_AGENT,
@@ -99,8 +96,8 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "html",
-            "max_age_days": 3,
+            "connector": "alfabank",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "link_selector": "main a[href*='/news/t/'], a[href*='/news/t/']",
             "date_selectors": [
                 "meta[property='article:published_time']",
@@ -121,8 +118,8 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "html_files",
-            "max_age_days": 3,
+            "connector": "sber",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "link_selector": "a[href]",
             "url_contains": ["/news-and-media/", "/investor-relations/"],
             "file_extensions": [".pdf", ".html"],
@@ -138,8 +135,8 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "html",
-            "max_age_days": 3,
+            "connector": "tbank",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "link_selector": "main a[href*='/about/news/'], a[href*='/about/news/']",
             "date_selectors": [
                 "meta[property='article:published_time']",
@@ -155,13 +152,13 @@ INITIAL_SOURCES = [
     {
         "id": 8,
         "name": "ВТБ: пресс-центр и IR",
-        "url": "https://www.vtb.com/about/press-center/",
+        "url": "https://www.vtb.ru/about/press/",
         "source_type": "site",
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "html_files",
-            "max_age_days": 3,
+            "connector": "vtb",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "link_selector": "a[href]",
             "url_contains": ["/about/press-center/", "/ir/"],
             "file_extensions": [".pdf", ".xlsx", ".xls", ".html"],
@@ -177,8 +174,8 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "rss",
-            "max_age_days": 3,
+            "connector": "rbc",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "timeout": 15,
             "user_agent": DEFAULT_USER_AGENT,
         },
@@ -191,22 +188,22 @@ INITIAL_SOURCES = [
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "rss",
-            "max_age_days": 3,
+            "connector": "vedomosti",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "timeout": 15,
             "user_agent": DEFAULT_USER_AGENT,
         },
     },
     {
         "id": 11,
-        "name": "Коммерсантъ: архив новостей",
-        "url": "https://www.kommersant.ru/archive/news",
+        "name": "Коммерсантъ: финансы",
+        "url": "https://www.kommersant.ru/finance",
         "source_type": "site",
         "is_active": 1,
         "parse_frequency_minutes": 60,
         "parser_config": {
-            "kind": "html",
-            "max_age_days": 3,
+            "connector": "kommersant",
+            "max_age_days": PARSE_WINDOW_DAYS,
             "link_selector": "a[href^='/doc/'], a[href*='/doc/']",
             "date_selectors": [
                 "meta[property='article:published_time']",
@@ -217,20 +214,6 @@ INITIAL_SOURCES = [
             "pause": 0.5,
             "timeout": 15,
             "user_agent": DEFAULT_USER_AGENT,
-        },
-    },
-    {
-        "id": 12,
-        "name": "Yandex Search API discovery",
-        "url": "https://searchapi.api.cloud.yandex.net/v2/web/searchAsync",
-        "source_type": "api",
-        "is_active": 0,
-        "parse_frequency_minutes": 60,
-        "parser_config": {
-            "kind": "yandex_search",
-            "max_age_days": 3,
-            "query_text": "Банк России OR Минфин OR Мосбиржа fintech банк",
-            "requires_env": ["YANDEX_API_KEY", "YANDEX_FOLDER_ID"],
         },
     },
 ]
@@ -267,6 +250,34 @@ CREATE TABLE IF NOT EXISTS raw_news (
     FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS moex_daily_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    trade_date TEXT NOT NULL,
+    securities_count INTEGER,
+    traded_securities_count INTEGER,
+    total_value REAL,
+    total_value_usd REAL,
+    total_volume REAL,
+    total_trades INTEGER,
+    average_last REAL,
+    average_marketprice REAL,
+    top_secid TEXT,
+    top_shortname TEXT,
+    top_value REAL,
+    top_volume_secid TEXT,
+    top_volume_shortname TEXT,
+    top_volume REAL,
+    top_trades_secid TEXT,
+    top_trades_shortname TEXT,
+    top_trades INTEGER,
+    moex_systime TEXT,
+    raw_data TEXT,
+    fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE,
+    UNIQUE(source_id, trade_date)
+);
+
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     raw_news_id INTEGER NOT NULL,
@@ -287,6 +298,7 @@ CREATE TABLE IF NOT EXISTS signals (
 
 CREATE INDEX IF NOT EXISTS idx_raw_news_status ON raw_news(status);
 CREATE INDEX IF NOT EXISTS idx_raw_news_content_hash ON raw_news(content_hash);
+CREATE INDEX IF NOT EXISTS idx_moex_daily_stats_trade_date ON moex_daily_stats(trade_date);
 """
 
 
@@ -311,6 +323,9 @@ def init_db(db_path: str | Path | None = None, seed_initial_source: bool = True)
     with connect_db(db_path) as connection:
         connection.executescript(SCHEMA_SQL)
         ensure_column(connection, "sources", "parser_config", "TEXT")
+        ensure_moex_daily_columns(connection)
+        remove_retired_sources(connection)
+        cleanup_bad_raw_news(connection)
         if seed_initial_source:
             seed_sources(connection)
         connection.commit()
@@ -325,12 +340,93 @@ def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: 
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
+def ensure_moex_daily_columns(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(moex_daily_stats)")
+    }
+    new_columns = {
+        "total_value_usd": "REAL",
+        "traded_securities_count": "INTEGER",
+        "top_volume_secid": "TEXT",
+        "top_volume_shortname": "TEXT",
+        "top_volume": "REAL",
+        "top_trades_secid": "TEXT",
+        "top_trades_shortname": "TEXT",
+        "top_trades": "INTEGER",
+        "moex_systime": "TEXT",
+    }
+    for column_name, column_type in new_columns.items():
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE moex_daily_stats ADD COLUMN {column_name} {column_type}")
+
+
+def remove_retired_sources(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        DELETE FROM sources
+        WHERE url = 'https://searchapi.api.cloud.yandex.net/v2/web/searchAsync'
+           OR url LIKE 'https://www.finextra.com/rss/%'
+           OR parser_config LIKE '%yandex_search%'
+    """)
+
+
+def cleanup_bad_raw_news(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        DELETE FROM raw_news
+        WHERE published_at IS NULL
+           OR datetime(published_at) < datetime('now', 'localtime', ?)
+           OR datetime(published_at) > datetime('now', 'localtime', ?)
+           OR LENGTH(TRIM(text)) < ?
+           OR TRIM(COALESCE(title, '')) = TRIM(text)
+    """, (
+        f"-{RAW_NEWS_RETENTION_DAYS} days",
+        f"+{MAX_FUTURE_HOURS} hours",
+        MIN_TEXT_LENGTH,
+    ))
+    connection.execute("""
+        DELETE FROM raw_news
+        WHERE source_id = 2
+          AND url NOT LIKE '%id_4=%'
+    """)
+    connection.execute("""
+        DELETE FROM raw_news
+        WHERE source_id = 8
+          AND (
+              url LIKE 'https://www.vtb.com/ir/%'
+              OR url = 'https://www.vtb.com/about/press-center/'
+              OR url = 'https://www.vtb.ru/about/press/'
+          )
+    """)
+    connection.execute("""
+        DELETE FROM raw_news
+        WHERE source_id = 7
+          AND url = 'https://www.tbank.ru/about/news/'
+    """)
+    connection.execute("""
+        DELETE FROM raw_news
+        WHERE source_id = 3
+          AND published_at IS NULL
+    """)
+    connection.execute("""
+        DELETE FROM raw_news
+        WHERE source_id = 11
+          AND raw_data LIKE '%/archive/news%'
+    """)
+
+
 def seed_sources(connection: sqlite3.Connection) -> None:
     for source in INITIAL_SOURCES:
         seed_source(connection, source)
 
 
 def seed_source(connection: sqlite3.Connection, source: dict) -> None:
+    parser_config = dict(source["parser_config"])
+    parser_config["max_age_days"] = PARSE_WINDOW_DAYS
+    parser_config["max_age_hours"] = PARSE_WINDOW_HOURS
+    parser_config.setdefault("strict_dates", True)
+    parser_config.setdefault("max_future_hours", MAX_FUTURE_HOURS)
+    parser_config.setdefault("min_text_length", MIN_TEXT_LENGTH)
+
     connection.execute("""
         INSERT INTO sources (
             id,
@@ -356,7 +452,7 @@ def seed_source(connection: sqlite3.Connection, source: dict) -> None:
         source["source_type"],
         source["is_active"],
         source["parse_frequency_minutes"],
-        json.dumps(source["parser_config"], ensure_ascii=False),
+        json.dumps(parser_config, ensure_ascii=False),
     ))
 
 
