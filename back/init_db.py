@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -482,27 +483,28 @@ CREATE TABLE IF NOT EXISTS moex_daily_stats (
     UNIQUE(source_id, trade_date)
 );
 
-CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    raw_news_id INTEGER NOT NULL,
-    headline TEXT NOT NULL,
-    hotness INTEGER,
-    why_now TEXT,
-    category TEXT NOT NULL,
-    summary TEXT,
-    draft TEXT,
-    moderation_status TEXT NOT NULL DEFAULT 'pending',
-    confidence REAL,
-    model_name TEXT,
-    prompt_version TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (raw_news_id) REFERENCES raw_news(id) ON DELETE CASCADE
-);
-
 CREATE INDEX IF NOT EXISTS idx_raw_news_status ON raw_news(status);
 CREATE INDEX IF NOT EXISTS idx_raw_news_content_hash ON raw_news(content_hash);
 CREATE INDEX IF NOT EXISTS idx_moex_daily_stats_trade_date ON moex_daily_stats(trade_date);
+"""
+
+
+SIGNALS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    headline TEXT NOT NULL,
+    hotness INTEGER NOT NULL CHECK(hotness BETWEEN 1 AND 5),
+    why_now TEXT,
+    category TEXT NOT NULL CHECK(category IN (
+        'Инвестиции и рынки',
+        'Корпоративные финансы и сделки',
+        'Финансовые результаты',
+        'Макроэкономика и статистика'
+    )),
+    sources TEXT NOT NULL DEFAULT '[]',
+    summary TEXT,
+    draft TEXT
+);
 """
 
 
@@ -528,6 +530,7 @@ def init_db(db_path: str | Path | None = None, seed_initial_source: bool = True)
         connection.executescript(SCHEMA_SQL)
         ensure_column(connection, "sources", "parser_config", "TEXT")
         ensure_moex_daily_columns(connection)
+        ensure_signals_schema(connection)
         remove_retired_sources(connection)
         cleanup_bad_raw_news(connection)
         if seed_initial_source:
@@ -563,6 +566,42 @@ def ensure_moex_daily_columns(connection: sqlite3.Connection) -> None:
     for column_name, column_type in new_columns.items():
         if column_name not in columns:
             connection.execute(f"ALTER TABLE moex_daily_stats ADD COLUMN {column_name} {column_type}")
+
+
+def ensure_signals_schema(connection: sqlite3.Connection) -> None:
+    desired_columns = [
+        "id",
+        "headline",
+        "hotness",
+        "why_now",
+        "category",
+        "sources",
+        "summary",
+        "draft",
+    ]
+    columns = [
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(signals)")
+    ]
+    schema_row = connection.execute("""
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'signals'
+    """).fetchone()
+    schema_sql = schema_row["sql"] if schema_row else ""
+    if not columns:
+        connection.execute(SIGNALS_SCHEMA_SQL)
+        return
+    has_expected_constraints = (
+        "CHECK(hotness BETWEEN 1 AND 5)" in schema_sql
+        and "sources TEXT NOT NULL DEFAULT '[]'" in schema_sql
+    )
+    if columns == desired_columns and has_expected_constraints:
+        return
+
+    backup_name = f"signals_legacy_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    connection.execute(f"ALTER TABLE signals RENAME TO {backup_name}")
+    connection.execute(SIGNALS_SCHEMA_SQL)
 
 
 def remove_retired_sources(connection: sqlite3.Connection) -> None:
