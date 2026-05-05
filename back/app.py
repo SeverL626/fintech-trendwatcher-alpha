@@ -8,6 +8,8 @@ except ModuleNotFoundError:
 
 app = Flask(__name__)
 app.config["DB_PATH"] = DB_PATH
+app.json.ensure_ascii = False
+app.json.compact = False
 
 
 @app.route("/")

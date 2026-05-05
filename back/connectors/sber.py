@@ -1,10 +1,12 @@
 import re
+import requests
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from .base import BaseConnector
+from .telegram import TelegramConnector
 
 
 class SberConnector(BaseConnector):
@@ -13,9 +15,22 @@ class SberConnector(BaseConnector):
     ARTICLE_MARKER = "/news-and-media/press-releases/article"
 
     def parse(self, source, config):
-        config = {**config, "use_firecrawl_on_block": True}
+        config = {**config, "referer": source["url"], "_session": requests.Session()}
+        items = []
+        try:
+            items.extend(self.parse_site(source, config))
+        except Exception:
+            pass
+        if config.get("use_telegram_fallback", True):
+            items.extend(self.parse_official_telegram(source, config))
+        return items
+
+    def parse_site(self, source, config):
         response = self.fetch(source["url"], config)
         soup = BeautifulSoup(response.text, "lxml")
+        return self.items_from_site_listing(source, config, soup)
+
+    def items_from_site_listing(self, source, config, soup):
         items = []
         seen = set()
         existing_urls = config.get("_existing_urls") or set()
@@ -27,11 +42,9 @@ class SberConnector(BaseConnector):
             if self.ARTICLE_MARKER not in href:
                 continue
             url = urljoin(source["url"], href)
-            if url in seen:
+            if url in seen or url in existing_urls:
                 continue
             seen.add(url)
-            if url in existing_urls:
-                continue
 
             title = self.html_to_text(link.get_text(" ", strip=True))
             published_at = self.extract_card_date(link, title)
@@ -51,7 +64,31 @@ class SberConnector(BaseConnector):
             }))
             if len(items) >= max_links:
                 break
+        return items
 
+    def parse_official_telegram(self, source, config):
+        telegram_source = {
+            **source,
+            "name": f"{source['name']} / Telegram: Сбер",
+            "url": "https://t.me/sberbank",
+        }
+        telegram_config = {
+            **config,
+            "channel": "sberbank",
+            "min_text_length": min(int(config.get("min_text_length") or 80), 20),
+        }
+        items = TelegramConnector().parse(telegram_source, telegram_config)
+        for item in items:
+            raw_data = item.get("raw_data") or {}
+            raw_data.update({
+                "adapter": self.name,
+                "fallback_adapter": "telegram",
+                "source": source["name"],
+                "source_url": source["url"],
+                "fallback_source_url": telegram_source["url"],
+                "text_source": "official_telegram",
+            })
+            item["raw_data"] = raw_data
         return items
 
     def extract_card_date(self, link, title):
@@ -74,11 +111,23 @@ class SberConnector(BaseConnector):
         try:
             response = self.fetch(url, config)
             soup = BeautifulSoup(response.text, "lxml")
-            text = self.extract_sber_text(soup)
+            text = (
+                self.extract_sber_text(soup)
+                or self.extract_json_ld_text(soup)
+                or self.extract_embedded_json_text(soup)
+                or self.extract_article_text(soup)
+            )
             if len(text) >= 200:
-                return text, "article_firecrawl"
+                return text, "article_html"
         except Exception:
             pass
+        if config.get("use_jina_reader", True):
+            try:
+                text = self.clean_reader_text(self.fetch_reader_text(url, config), title)
+                if len(text) >= 200:
+                    return text, "article_jina_reader"
+            except Exception:
+                pass
         return self.make_listing_text(title, url), "listing_fallback"
 
     def extract_sber_text(self, soup):

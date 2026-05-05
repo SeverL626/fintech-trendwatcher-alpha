@@ -32,8 +32,7 @@ class TelegramConnector(BaseConnector):
             if not text:
                 continue
 
-            title = self.make_title(text, source["name"])
-            items.append(self.make_news_item(url, title, published_at, text, {
+            items.append(self.make_news_item(url, None, published_at, text, {
                 "adapter": self.name,
                 "source": source["name"],
                 "source_url": source["url"],
@@ -68,10 +67,3 @@ class TelegramConnector(BaseConnector):
             hidden.decompose()
         return self.html_to_text(str(text_element))
 
-    def make_title(self, text, fallback):
-        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
-        if not first_line:
-            return fallback
-        if len(first_line) <= 140:
-            return first_line
-        return f"{first_line[:137].rstrip()}..."

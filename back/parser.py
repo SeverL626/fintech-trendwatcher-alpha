@@ -220,8 +220,11 @@ def is_telegram_item(item):
     return (
         item.get("adapter") == "telegram"
         or raw_data.get("adapter") == "telegram"
+        or raw_data.get("fallback_adapter") == "telegram"
+        or raw_data.get("text_source") == "official_telegram"
         or str(item.get("source_url", "")).startswith("https://t.me/")
         or str(raw_data.get("source_url", "")).startswith("https://t.me/")
+        or str(raw_data.get("fallback_source_url", "")).startswith("https://t.me/")
     )
 
 def normalize_news_item(item, config):

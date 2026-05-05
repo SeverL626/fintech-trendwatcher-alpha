@@ -39,7 +39,6 @@ http://127.0.0.1:5000/parser
 
 | ID | Источник | URL | Тип | Коннектор | Статус | Куда пишется |
 |---:|---|---|---|---|---|---|
-| 1 | Банк России: новости, интервью, выступления | `https://www.cbr.ru/rss/eventrss` | `rss` | `cbr` | активен | `raw_news` |
 | 2 | Минфин России: пресс-центр | `https://minfin.gov.ru/ru/press-center/` | `site` | `minfin` | активен | `raw_news` |
 | 3 | Росстат: национальные счета | `https://rosstat.gov.ru/statistics/accounts` | `site` | `rosstat` | активен, `verify_ssl=false` | `raw_news` |
 | 4 | MOEX ISS shares | `https://iss.moex.com/iss/engines/stock/markets/shares/securities.json` | `api` | `moex` | активен | `moex_daily_stats` |
@@ -50,6 +49,20 @@ http://127.0.0.1:5000/parser
 | 9 | РБК RSS | `https://rssexport.rbc.ru/rbcnews/news/30/full.rss` | `rss` | `rbc` | активен | `raw_news` |
 | 10 | Ведомости RSS: банки | `https://www.vedomosti.ru/rss/rubric/finance/banks` | `rss` | `vedomosti` | активен | `raw_news` |
 | 11 | Коммерсантъ: финансы | `https://www.kommersant.ru/finance` | `site` | `kommersant` | активен | `raw_news` |
+| 24 | Росфинмониторинг: информационные сообщения | `https://fedsfm.ru/` | `site` | `fedsfm` | активен, `verify_ssl=false` | `raw_news` |
+| 25 | ФНС России: новости | `https://www.nalog.gov.ru/rn77/news/activities_fts/` | `site` | `nalog` | активен | `raw_news` |
+| 26 | Банк России: новости | `https://cbr.ru/news/` | `api` | `cbr_news` | активен | `raw_news` |
+| 27 | Ассоциация ФинТех: пресс-центр | `https://www.fintechru.org/press-center/` | `site` | `html` | активен | `raw_news` |
+| 28 | Fintech News Singapore RSS | `https://fintechnews.sg/feed/` | `rss` | `rss` | активен | `raw_news` |
+| 29 | The Paypers: fintech and payments | `https://thepaypers.com/` | `site` | `html` | активен | `raw_news` |
+| 30 | IBS Intelligence RSS | `https://ibsintelligence.com/feed/` | `rss` | `rss` | активен | `raw_news` |
+| 31 | TechAfrica News RSS | `https://techafricanews.com/feed/` | `rss` | `rss` | активен | `raw_news` |
+| 32 | Biometric Update RSS | `https://www.biometricupdate.com/feed` | `rss` | `rss` | активен | `raw_news` |
+| 33 | Cloud Computing News RSS | `https://www.cloudcomputing-news.net/feed/` | `rss` | `rss` | активен | `raw_news` |
+| 34 | GlobeNewswire: public companies | `https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies` | `rss` | `rss` | активен | `raw_news` |
+| 35 | ECB: press releases RSS | `https://www.ecb.europa.eu/rss/press.html` | `rss` | `rss` | активен | `raw_news` |
+| 36 | Korea Herald: business | `https://www.koreaherald.com/business` | `site` | `koreaherald` | активен | `raw_news` |
+| 37 | The Fintech Times RSS | `https://thefintechtimes.com/feed/` | `rss` | `rss` | активен | `raw_news` |
 
 ## База Данных
 
@@ -57,7 +70,7 @@ http://127.0.0.1:5000/parser
 
 Источники, которые использует парсер.
 
-При `python back\init_db.py` создаётся стартовый набор источников. В `parser_config` лежит имя коннектора, период поиска и параметры конкретного источника. Активны источники 1-11. Для Росстата временно задано `verify_ssl=false`, потому что локальная проверка цепочки сертификата может падать.
+При `python back\init_db.py` создаётся стартовый набор источников. В `parser_config` лежит имя коннектора, период поиска и параметры конкретного источника. Для Росстата и Росфинмониторинга временно задано `verify_ssl=false`, потому что локальная проверка цепочки сертификата может падать.
 
 | Поле | Описание |
 | --- | --- |
@@ -137,7 +150,9 @@ http://127.0.0.1:5000/parser
 
 ## Telegram-Каналы
 
-Окно поиска: последний 1 час.
+Окно поиска: последние сутки.
+
+Кроме отдельных Telegram-источников ниже, коннекторы Альфа-Банка и Сбера дополнительно читают официальные Telegram-каналы `https://t.me/alfabank` и `https://t.me/sberbank` параллельно с основными сайтами.
 
 Официальные источники:
 

@@ -16,6 +16,7 @@ class RssConnector(BaseConnector):
         root = self.parse_xml(response.content)
         items = []
         seen = set()
+        max_items = int(config.get("max_items") or config.get("max_links") or 80)
 
         for element in root.iter():
             if self.local_name(element.tag) != "item":
@@ -54,6 +55,8 @@ class RssConnector(BaseConnector):
                     "article_error": article.get("error"),
                 },
             ))
+            if len(items) >= max_items:
+                break
 
         return items
 
@@ -142,8 +145,11 @@ class HtmlConnector(BaseConnector):
                 continue
 
             title = link.get_text(" ", strip=True) or source["name"]
+            listing_published_at = self.extract_date_from_text(
+                self.extract_listing_context(link)
+            )
             try:
-                article = self.parse_article_page(url, config, title)
+                article = self.parse_article_page(url, config, title, listing_published_at)
             except Exception as error:
                 items.append(self.make_news_item(url, title, None, title, {
                     "adapter": self.name,
@@ -161,7 +167,7 @@ class HtmlConnector(BaseConnector):
 
             items.append(self.make_news_item(
                 article.get("canonical_url") or url,
-                article.get("title") or title,
+                title if config.get("prefer_listing_title") else article.get("title") or title,
                 published_at,
                 article.get("text") or title,
                 {
@@ -182,6 +188,33 @@ class HtmlConnector(BaseConnector):
         if not url_contains:
             return True
         return any(marker in url for marker in url_contains)
+
+    def extract_listing_context(self, link):
+        parts = [link.get_text(" ", strip=True)]
+        parent = link.parent
+        for _ in range(3):
+            if not parent or not getattr(parent, "get_text", None):
+                break
+            text = parent.get_text(" ", strip=True)
+            if text and len(text) <= 700:
+                parts.append(text)
+            parent = parent.parent
+        return " ".join(parts)
+
+    def extract_date_from_text(self, text):
+        text = str(text or "")
+        patterns = (
+            r"\b\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?\b",
+            r"\b\d{1,2}\s+[A-Za-zА-Яа-яёЁ]+\s+20\d{2}\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            published_at = self.normalize_published_at(match.group(0))
+            if published_at:
+                return published_at
+        return None
 
 
 class HtmlFilesConnector(HtmlConnector):
@@ -245,14 +278,6 @@ class HtmlFilesConnector(HtmlConnector):
 
         filename = unquote(url.rsplit("/", 1)[-1])
         return filename or source["name"]
-
-    def extract_date_from_text(self, text):
-        text = str(text or "")
-        date_match = re.search(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b", text)
-        if date_match:
-            return self.normalize_published_at(date_match.group(0))
-        return self.normalize_published_at(text)
-
 
 class MoexStatsConnector(BaseConnector):
     name = "moex"

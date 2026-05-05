@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import html as html_lib
-import os
+import json
 from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
@@ -10,14 +10,6 @@ from xml.etree import ElementTree
 import dateparser
 import requests
 from bs4 import BeautifulSoup
-from requests.models import Response
-
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except Exception:
-    pass
 
 
 DEFAULT_LOOKBACK_DAYS = 1
@@ -35,29 +27,37 @@ class BaseConnector:
         raise NotImplementedError(f"Connector {self.name} is not implemented")
 
     def fetch(self, url, config):
-        headers = {"User-Agent": config.get("user_agent") or DEFAULT_USER_AGENT}
+        headers = self.make_headers(config)
         verify_ssl = config.get("verify_ssl", True)
         if not verify_ssl:
             disable_insecure_request_warning()
 
-        response = requests.get(
+        session = config.get("_session")
+        requester = session.get if session else requests.get
+        response = requester(
             url,
             headers=headers,
             timeout=config.get("timeout") or 15,
             verify=verify_ssl,
         )
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as error:
-            if response.status_code in (403, 429):
-                return self.fetch_with_firecrawl(url, config, str(error))
-            raise
+        response.raise_for_status()
         self.fix_response_encoding(response)
-        try:
-            self.raise_if_blocked(response, url)
-        except BlockedRequestError as error:
-            return self.fetch_with_firecrawl(url, config, str(error))
+        self.raise_if_blocked(response, url)
         return response
+
+    def make_headers(self, config):
+        headers = {
+            "User-Agent": config.get("user_agent") or DEFAULT_USER_AGENT,
+            "Accept": config.get("accept")
+            or "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": config.get("accept_language") or "ru-RU,ru;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        if config.get("referer"):
+            headers["Referer"] = config["referer"]
+        headers.update(config.get("headers") or {})
+        return headers
 
     def fix_response_encoding(self, response):
         content_type = response.headers.get("content-type", "")
@@ -169,56 +169,137 @@ class BaseConnector:
         waf_markers = (
             "user_blocked",
             "servicepipe.ru",
-            "captcha",
             "cloudflare",
             "if you are not a bot",
             "request rejected",
             "access denied",
+            "please enable javascript",
+            "dosl7.challenge",
+            "window[\"bobcmn\"]",
+            "/tspd/",
         )
         if any(marker in sample for marker in waf_markers):
             raise BlockedRequestError(
-                f"{url} blocked automated requests; use browser rendering or Firecrawl"
+                f"{url} blocked automated requests"
             )
 
-    def fetch_with_firecrawl(self, url, config, reason):
-        if not config.get("use_firecrawl_on_block"):
-            raise BlockedRequestError(reason)
+    def fetch_reader_text(self, url, config):
+        last_error = None
+        for reader_url in self.reader_urls(url):
+            try:
+                response = requests.get(
+                    reader_url,
+                    headers={
+                        "User-Agent": config.get("user_agent") or DEFAULT_USER_AGENT,
+                        "Accept": "text/plain,*/*;q=0.8",
+                        "Accept-Language": config.get("accept_language") or "ru-RU,ru;q=0.9,en;q=0.8",
+                        "x-no-cache": "true",
+                    },
+                    timeout=config.get("reader_timeout") or 30,
+                )
+                response.raise_for_status()
+                self.fix_response_encoding(response)
+                text = response.text.strip()
+                if text and not self.reader_text_is_blocked(text):
+                    return text
+            except Exception as error:
+                last_error = error
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Jina Reader returned empty content for {url}")
 
-        api_key = config.get("firecrawl_api_key") or os.getenv("FIRECRAWL_API_KEY")
-        if not api_key:
-            raise BlockedRequestError(
-                f"{reason}; set FIRECRAWL_API_KEY to render this source via Firecrawl"
-            )
+    def reader_urls(self, url):
+        urls = [f"https://r.jina.ai/{url}"]
+        if url.startswith("https://"):
+            urls.append(f"https://r.jina.ai/http://r.jina.ai/http://{url}")
+        return urls
 
-        response = requests.post(
-            "https://api.firecrawl.dev/v2/scrape",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "url": url,
-                "formats": ["html"],
-                "onlyMainContent": False,
-            },
-            timeout=config.get("firecrawl_timeout") or 60,
+    def reader_text_is_blocked(self, text):
+        lowered = text.lower()
+        return (
+            "requiring captcha" in lowered
+            or "securitycompromiseerror" in lowered
+            or "anonymous access to domain" in lowered
         )
-        response.raise_for_status()
-        payload = response.json()
-        data = payload.get("data") if isinstance(payload, dict) else None
-        body = ""
-        if isinstance(data, dict):
-            body = data.get("html") or data.get("rawHtml") or data.get("markdown") or ""
-        if not body:
-            raise RuntimeError(f"Firecrawl returned empty content for {url}")
 
-        rendered = Response()
-        rendered.status_code = 200
-        rendered.url = url
-        rendered.encoding = "utf-8"
-        rendered._content = str(body).encode("utf-8")
-        rendered.headers["content-type"] = "text/html; charset=utf-8"
-        return rendered
+    def clean_reader_text(self, raw_text, title=None):
+        lines = []
+        capture = not title
+        title_normalized = " ".join(str(title or "").lower().split())
+        skip_prefixes = (
+            "Title:",
+            "URL Source:",
+            "Markdown Content:",
+            "Published Time:",
+            "Warning:",
+        )
+        for raw_line in str(raw_text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(skip_prefixes):
+                continue
+            normalized = " ".join(line.lower().split())
+            if title_normalized and title_normalized in normalized:
+                capture = True
+                continue
+            if capture:
+                lines.append(line)
+        return self.html_to_text("\n\n".join(lines))
+
+    def extract_json_ld_text(self, soup):
+        parts = []
+        for script in soup.select("script[type='application/ld+json']"):
+            raw = script.string or script.get_text()
+            if not raw:
+                continue
+            try:
+                payload = html_lib.unescape(raw)
+                data = json.loads(payload)
+            except Exception:
+                continue
+            parts.extend(self.extract_json_text_values(data))
+        return "\n\n".join(unique_texts(parts)).strip()
+
+    def extract_json_text_values(self, data):
+        values = []
+        if isinstance(data, list):
+            for item in data:
+                values.extend(self.extract_json_text_values(item))
+            return values
+        if not isinstance(data, dict):
+            return values
+
+        for key in ("articleBody", "description", "text"):
+            value = data.get(key)
+            if isinstance(value, str) and len(value.strip()) >= 80:
+                values.append(self.html_to_text(value))
+        for value in data.values():
+            if isinstance(value, (dict, list)):
+                values.extend(self.extract_json_text_values(value))
+        return values
+
+    def extract_embedded_json_text(self, soup):
+        parts = []
+        patterns = (
+            r'"articleBody"\s*:\s*"(?P<value>(?:\\.|[^"\\])*)"',
+            r'"description"\s*:\s*"(?P<value>(?:\\.|[^"\\])*)"',
+        )
+        for script in soup.select("script"):
+            raw = script.string or script.get_text()
+            if not raw or len(raw) < 200:
+                continue
+            for pattern in patterns:
+                for match in re.finditer(pattern, raw):
+                    value = match.group("value")
+                    try:
+                        decoded = value.encode("utf-8").decode("unicode_escape")
+                    except UnicodeDecodeError:
+                        decoded = value
+                    text = self.html_to_text(decoded)
+                    if len(text) >= 80:
+                        parts.append(text)
+        return "\n\n".join(unique_texts(parts)).strip()
 
     def local_name(self, tag):
         return str(tag).rsplit("}", 1)[-1].split(":", 1)[-1]
@@ -281,7 +362,10 @@ class BaseConnector:
     def extract_published_at(self, soup):
         selectors = [
             "meta[property='article:published_time']",
+            "meta[property='article:modified_time']",
             "meta[name='pubdate']",
+            "meta[name='date']",
+            "meta[name='parsely-pub-date']",
             "time[datetime]",
             ".article__header__date",
             ".article__date",
@@ -298,6 +382,20 @@ class BaseConnector:
             else:
                 value = element.get_text(" ", strip=True)
             published_at = self.normalize_published_at(value)
+            if published_at:
+                return published_at
+        full_text = soup.get_text(" ", strip=True)
+        for pattern in (
+            r"Дата публикации:\s*\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?",
+            r"\b\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2})?\b",
+            r"\b\d{1,2}\s+[A-Za-z]+\s+20\d{2}(?:\s+\d{1,2}:\d{2})?\b",
+            r"\b[A-Za-z]+\s+\d{1,2},\s+20\d{2}(?:\s+\d{1,2}:\d{2})?\b",
+        ):
+            match = re.search(pattern, full_text)
+            if not match:
+                continue
+            raw_date = match.group(0).replace("Дата публикации:", "").strip()
+            published_at = self.normalize_published_at(raw_date)
             if published_at:
                 return published_at
         return None
@@ -353,6 +451,18 @@ class NotImplementedConnector(BaseConnector):
 
 class BlockedRequestError(RuntimeError):
     pass
+
+
+def unique_texts(values):
+    result = []
+    seen = set()
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def disable_insecure_request_warning():

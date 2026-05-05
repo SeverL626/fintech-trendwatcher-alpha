@@ -1,10 +1,13 @@
 from .base import NotImplementedConnector
-from .generic import RssConnector
+from .generic import HtmlConnector, RssConnector
 from .alfabank import AlfabankConnector
-from .cbr import CbrConnector
+from .cbr import CbrConnector, CbrNewsConnector
 from .kommersant import KommersantConnector
 from .minfin import MinfinConnector
 from .moex import MoexConnector
+from .nalog import NalogConnector
+from .koreaherald import KoreaheraldConnector
+from .fedsfm import FedsfmConnector
 from .rbc import RbcConnector
 from .rosstat import RosstatConnector
 from .sber import SberConnector
@@ -16,8 +19,10 @@ from .vtb import VtbConnector
 
 CONNECTORS = {
     "rss": RssConnector,
+    "html": HtmlConnector,
     "rbc": RbcConnector,
     "cbr": CbrConnector,
+    "cbr_news": CbrNewsConnector,
     "minfin": MinfinConnector,
     "rosstat": RosstatConnector,
     "moex": MoexConnector,
@@ -28,6 +33,9 @@ CONNECTORS = {
     "vtb": VtbConnector,
     "vedomosti": VedomostiConnector,
     "kommersant": KommersantConnector,
+    "nalog": NalogConnector,
+    "koreaherald": KoreaheraldConnector,
+    "fedsfm": FedsfmConnector,
 }
 
 
