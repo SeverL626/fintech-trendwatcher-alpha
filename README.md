@@ -31,9 +31,9 @@ docker compose up -d --build
 http://127.0.0.1:5000/parser
 ```
 
-Окно поиска по умолчанию: последние 1 сутки. Фильтрации по содержанию сейчас нет: парсер собирает данные из подключенных источников, релевантность будет отдельным слоем.
+Окно поиска: последние 1 сутки
 
-Новости и документы пишутся в `raw_news`. Дневная статистика MOEX из ISS API пишется отдельно в `moex_daily_stats`.
+Фильтрация: нет
 
 ## Источники
 
@@ -140,24 +140,3 @@ http://127.0.0.1:5000/parser
 | `prompt_version` | Версия промпта |
 | `created_at` | Когда карточка создана |
 | `updated_at` | Когда карточка обновлена |
-
-## Коннекторы
-
-```text
-back/
-  parser.py
-  connectors/
-    base.py
-    generic.py
-    cbr.py
-    minfin.py
-    rosstat.py
-    moex.py
-    alfabank.py
-    sber.py
-    tbank.py
-    vtb.py
-    rbc.py
-    vedomosti.py
-    kommersant.py
-```
