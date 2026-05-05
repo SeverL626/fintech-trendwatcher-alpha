@@ -1,12 +1,9 @@
-import subprocess
-import sys
-
 from flask import Flask, jsonify
 
 try:
-    from back.init_db import PROJECT_ROOT, DB_PATH
+    from back.init_db import DB_PATH
 except ModuleNotFoundError:
-    from init_db import PROJECT_ROOT, DB_PATH
+    from init_db import DB_PATH
 
 
 app = Flask(__name__)
@@ -18,7 +15,7 @@ def hello():
     return jsonify({
         "ok": True,
         "message": "Welcom to main page of the Alfa-HackItOn backend!",
-        "routes": ["/parser", "/tests/all", "/tests/db"],
+        "routes": ["/parser"],
     })
 
 
@@ -28,31 +25,6 @@ def run_parser():
         "ok": True,
         "parser": run_parser_from_db(app.config["DB_PATH"]),
     })
-
-
-@app.route("/tests/all")
-def run_all_tests():
-    return run_tests(["discover", "-s", "tests"])
-
-
-@app.route("/tests/db")
-def run_db_tests():
-    return run_tests(["tests.test_database"])
-
-
-def run_tests(test_args):
-    result = subprocess.run(
-        [sys.executable, "-m", "unittest", *test_args],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    return jsonify({
-        "ok": result.returncode == 0,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }), 200 if result.returncode == 0 else 500
 
 
 def run_parser_from_db(db_path):
