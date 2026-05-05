@@ -174,7 +174,6 @@ def source_error_result(source, error):
         "error": str(error),
     }
 
-
 def format_source_summary(result):
     if result.get("error"):
         return (
@@ -208,10 +207,22 @@ def load_parser_config(raw_config):
         if not isinstance(loaded_config, dict):
             raise ValueError("parser_config must be a JSON object")
         config.update(loaded_config)
-    config["max_age_days"] = DEFAULT_LOOKBACK_DAYS
-    config["max_age_hours"] = DEFAULT_LOOKBACK_DAYS * 24
+    config["max_age_days"] = int(config.get("max_age_days") or DEFAULT_LOOKBACK_DAYS)
+    if config.get("max_age_hours") is None:
+        config["max_age_hours"] = config["max_age_days"] * 24
+    else:
+        config["max_age_hours"] = int(config["max_age_hours"])
     return config
 
+def is_telegram_item(item):
+    raw_data = item.get("raw_data") or {}
+
+    return (
+        item.get("adapter") == "telegram"
+        or raw_data.get("adapter") == "telegram"
+        or str(item.get("source_url", "")).startswith("https://t.me/")
+        or str(raw_data.get("source_url", "")).startswith("https://t.me/")
+    )
 
 def normalize_news_item(item, config):
     if not item or not item.get("url"):
@@ -220,18 +231,29 @@ def normalize_news_item(item, config):
     title = clean_text(item.get("title"))
     text = clean_text(item.get("text"))
     published_at = item.get("published_at")
+    is_telegram = is_telegram_item(item)
 
     if not DATE_VALIDATOR.is_recent(published_at, config):
         return None
+
     if looks_mojibake(title) or looks_mojibake(text):
         title = repair_mojibake(title)
         text = repair_mojibake(text)
-    if not is_useful_text(title, text, config):
+
+    if not is_useful_text(title, text, config, allow_title_equals_text=is_telegram):
         return None
 
     normalized = dict(item)
-    normalized["title"] = title
-    normalized["text"] = remove_title_prefix(text, title)
+
+    if is_telegram:
+        # Для Telegram вообще не сохраняем title
+        normalized["title"] = None
+        normalized["text"] = text
+    else:
+        # Для сайтов оставляем старую логику
+        normalized["title"] = title
+        normalized["text"] = remove_title_prefix(text, title)
+
     normalized["published_at"] = published_at
     return normalized
 
@@ -255,15 +277,17 @@ def looks_mojibake(value):
     return any(marker in text for marker in MOJIBAKE_MARKERS)
 
 
-def is_useful_text(title, text, config):
+def is_useful_text(title, text, config, allow_title_equals_text=False):
     if not text:
         return False
+
     if looks_mojibake(text):
         return False
 
     compact_title = compact_for_compare(title)
     compact_text = compact_for_compare(text)
-    if compact_title and compact_title == compact_text:
+
+    if compact_title and compact_title == compact_text and not allow_title_equals_text:
         return False
 
     min_text_length = int(config.get("min_text_length") or MIN_TEXT_LENGTH)

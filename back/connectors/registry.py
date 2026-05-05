@@ -9,6 +9,7 @@ from .rbc import RbcConnector
 from .rosstat import RosstatConnector
 from .sber import SberConnector
 from .tbank import TbankConnector
+from .telegram import TelegramConnector
 from .vedomosti import VedomostiConnector
 from .vtb import VtbConnector
 
@@ -23,6 +24,7 @@ CONNECTORS = {
     "alfabank": AlfabankConnector,
     "sber": SberConnector,
     "tbank": TbankConnector,
+    "telegram": TelegramConnector,
     "vtb": VtbConnector,
     "vedomosti": VedomostiConnector,
     "kommersant": KommersantConnector,
