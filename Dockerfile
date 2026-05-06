@@ -12,4 +12,4 @@ COPY . .
 
 EXPOSE 5000
 
-CMD ["sh", "-c", "python back/init_db.py && gunicorn --timeout 300 -b 0.0.0.0:5000 back.app:app"]
+CMD ["gunicorn", "--timeout", "300", "-b", "0.0.0.0:5000", "back.app:app"]
