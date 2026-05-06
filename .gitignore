@@ -63,6 +63,8 @@ db.sqlite3
 db.sqlite3-journal
 data/*.db
 data/*.db-journal
+data/parser.lock
+data/parser_manual_throttle.json
 
 # Flask stuff:
 instance/
@@ -134,6 +136,7 @@ dmypy.json
 # IDE
 .vscode/
 .idea/
+scripts/
 
 # OS
 .DS_Store

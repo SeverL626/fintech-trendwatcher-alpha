@@ -11,6 +11,9 @@ env/
 .mypy_cache/
 .vscode/
 .idea/
+scripts/
 data/*.db
 data/*.db-journal
+data/parser.lock
+data/parser_manual_throttle.json
 *.log
