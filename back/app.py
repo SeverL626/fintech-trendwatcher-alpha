@@ -19,8 +19,10 @@ PARSER_SCHEDULE_HOURS = (6, 18)
 PARSER_PERIOD_HOURS = 12
 PARSER_LOCK_STALE_SECONDS = 6 * 60 * 60
 PARSER_LOCK_PATH = Path(DB_PATH).parent / "parser.lock"
-PARSER_MANUAL_COOLDOWN_SECONDS = 30 * 60
+PARSER_MANUAL_COOLDOWN_SECONDS = 60 * 60
 PARSER_MANUAL_THROTTLE_PATH = Path(DB_PATH).parent / "parser_manual_throttle.json"
+PARSER_TIMEOUT_SECONDS = 60 * 60
+PARSER_STATUS_PATH = Path(DB_PATH).parent / "parser_status.json"
 
 app = Flask(__name__)
 app.config["DB_PATH"] = DB_PATH
@@ -35,13 +37,14 @@ _scheduler_start_lock = threading.Lock()
 def hello():
     return jsonify({
         "ok": True,
-        "message": "Welcom to main page of the Alfa-HackItOn backend!",
+        "message": "Welcome to the Alfa-HackItOn backend!",
         "current_time": {
             "timezone": "Europe/Moscow",
             "iso": now_msk().isoformat(timespec="seconds"),
         },
         "parser_update_settings": get_parser_update_settings(),
-        "routes": ["/parser"],
+        "parser_status": get_parser_status(),
+        "routes": ["/parser", "/parser/status"],
     })
 
 
@@ -52,6 +55,15 @@ def run_parser():
         "ok": status_code == 202,
         "parser": parser_result,
     }), status_code
+
+
+@app.route("/parser/status")
+def parser_status():
+    status = get_parser_status()
+    return jsonify({
+        "ok": status.get("state") not in {"failed", "timed_out"},
+        "parser": status,
+    })
 
 
 def run_parser_from_db(db_path):
@@ -75,6 +87,7 @@ def get_parser_update_settings():
         "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
         "period_hours": PARSER_PERIOD_HOURS,
         "manual_cooldown_minutes": PARSER_MANUAL_COOLDOWN_SECONDS // 60,
+        "timeout_minutes": PARSER_TIMEOUT_SECONDS // 60,
         "next_run_at": get_next_parser_run_at(current_time).isoformat(timespec="seconds"),
     }
 
@@ -103,16 +116,22 @@ def run_parser_job(trigger):
         }, 409
 
     started_at = now_msk()
+    save_parser_running_status(trigger, started_at)
     return run_parser_job_with_lock(trigger, lock_fd, started_at)
 
 
 def run_parser_job_with_lock(trigger, lock_fd, started_at):
     try:
         result = run_parser_from_db(app.config["DB_PATH"])
+        finished_at = now_msk()
         result["trigger"] = trigger
         result["started_at"] = started_at.isoformat(timespec="seconds")
-        result["finished_at"] = now_msk().isoformat(timespec="seconds")
+        result["finished_at"] = finished_at.isoformat(timespec="seconds")
+        save_parser_finished_status(trigger, started_at, finished_at, result)
         return result, 200
+    except Exception as error:
+        save_parser_failed_status(trigger, started_at, now_msk(), error)
+        raise
     finally:
         release_parser_lock(lock_fd)
 
@@ -135,11 +154,12 @@ def start_parser_job_background(trigger):
     if trigger == "manual":
         try:
             save_manual_parser_started_at(started_at)
+            save_parser_running_status(trigger, started_at)
         except OSError as error:
             release_parser_lock(lock_fd)
             return {
                 "status": "error",
-                "message": f"Failed to save parser rate limit state: {error}",
+                "message": f"Failed to save parser state: {error}",
                 "trigger": trigger,
             }, 500
 
@@ -156,7 +176,96 @@ def start_parser_job_background(trigger):
         "message": "Parser started in background",
         "trigger": trigger,
         "started_at": started_at.isoformat(timespec="seconds"),
+        "status_url": "/parser/status",
     }, 202
+
+
+def get_parser_status():
+    status = load_parser_status()
+    if not status:
+        return {
+            "state": "idle",
+            "message": "Parser has not been started yet",
+            "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+        }
+
+    if status.get("state") == "running":
+        started_at = parse_msk_datetime(status.get("started_at"))
+        if started_at:
+            duration_seconds = max(0, int((now_msk() - started_at).total_seconds()))
+            status["duration_seconds"] = duration_seconds
+            if duration_seconds > PARSER_TIMEOUT_SECONDS:
+                status["state"] = "timed_out"
+                status["message"] = "Parser exceeded the 1 hour timeout"
+                status["timeout_seconds"] = PARSER_TIMEOUT_SECONDS
+                save_parser_status(status)
+
+    return status
+
+
+def load_parser_status():
+    try:
+        return json.loads(PARSER_STATUS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def save_parser_running_status(trigger, started_at):
+    save_parser_status({
+        "state": "running",
+        "message": "Parser is running",
+        "trigger": trigger,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": None,
+        "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+    })
+
+
+def save_parser_finished_status(trigger, started_at, finished_at, result):
+    save_parser_status({
+        "state": "finished",
+        "message": "Parser finished",
+        "trigger": trigger,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
+        "created": result.get("created"),
+        "errors": result.get("errors"),
+        "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+    })
+
+
+def save_parser_failed_status(trigger, started_at, finished_at, error):
+    save_parser_status({
+        "state": "failed",
+        "message": "Parser failed",
+        "trigger": trigger,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
+        "error": str(error),
+        "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+    })
+
+
+def save_parser_status(status):
+    PARSER_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PARSER_STATUS_PATH.write_text(
+        json.dumps(status, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def parse_msk_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=MSK_TZ)
+    return parsed.astimezone(MSK_TZ)
 
 
 def get_manual_parser_cooldown_response():
@@ -172,7 +281,7 @@ def get_manual_parser_cooldown_response():
     retry_after_seconds = max(1, int((next_allowed_at - current_time).total_seconds()))
     return {
         "status": "rate_limited",
-        "message": "Manual parser can be started only once every 30 minutes",
+        "message": "Manual parser can be started only once every 60 minutes",
         "trigger": "manual",
         "last_started_at": last_started_at.isoformat(timespec="seconds"),
         "next_allowed_at": next_allowed_at.isoformat(timespec="seconds"),
