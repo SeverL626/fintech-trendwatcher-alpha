@@ -106,7 +106,7 @@ States: `idle`, `running`, `finished`, `failed`, `timed_out`. The status timeout
 Auto parser schedule:
 
 ```text
-06:00 and 18:00 Europe/Moscow
+00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00 Europe/Moscow
 ```
 
 ## GitHub Actions Deploy
