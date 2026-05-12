@@ -1,207 +1,218 @@
 # Fintech Trendwatcher
 
-## Актуальное API
+Backend-сервис для сбора открытых финтех-публикаций и формирования карточек сигналов для банка.
 
-Главная страница:
-
-```text
-GET http://127.0.0.1:5000/
-```
-
-Ручной запуск парсера:
+## API
 
 ```text
-GET http://127.0.0.1:5000/parser
+GET /                 # настройки сервиса и update
+GET /update           # полный цикл: parser -> model
+GET /update/status    # статус полного цикла и этапов
+GET /signals          # готовые карточки сигналов
 ```
 
-Если запуск принят, сразу возвращает `202 Started`, сам парсер продолжает работать в фоне. Если парсер уже работает, ответ будет `409 busy`. Если ручной запуск запрашивают слишком часто, ответ будет `429 rate_limited`.
+## Update
 
-Статус парсера:
+Цикл:
+
+1. `parser` собирает новые публикации в `raw_news`.
+2. `model` берёт все `raw_news.status = 'new'` от старых к новым и пишет карточки в `signals`.
+
+Автозапуск:
 
 ```text
-GET http://127.0.0.1:5000/parser/status
+00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00 Europe/Moscow
 ```
 
-Показывает, идет ли парсер сейчас, когда он стартовал и когда закончил. Возможные состояния: `idle`, `running`, `finished`, `failed`, `timed_out`. Тайм-аут статуса: 1 час.
+Тайм-аут статуса: 1 час. Одновременно может работать только один update. Если update уже идёт, ручной или автоматический запуск не стартует второй процесс.
 
-Автозапуск парсера:
+## Sources
 
-```text
-00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00 каждый день по Europe/Moscow
-```
+Стартовый набор источников создаётся через `python back/init_db.py`.
 
-Служебные файлы состояния лежат рядом с БД в `data/`: `parser.lock`, `parser_manual_throttle.json`, `parser_status.json`. Они не входят в git и Docker image.
+| ID | Источник | Тип | Коннектор | URL |
+|---:|---|---|---|---|
+| 2 | Минфин России: пресс-центр | `site` | `minfin` | `https://minfin.gov.ru/ru/press-center/` |
+| 3 | Росстат: национальные счета | `site` | `rosstat` | `https://rosstat.gov.ru/statistics/accounts` |
+| 4 | MOEX ISS shares | `api` | `moex` | `https://iss.moex.com/iss/engines/stock/markets/shares/securities.json` |
+| 5 | Альфа-Банк: новости | `site` | `alfabank` | `https://alfabank.ru/news/t/` |
+| 6 | Сбер: пресс-релизы | `site` | `sber` | `https://www.sberbank.com/ru/news-and-media/press-releases` |
+| 7 | Т-Банк: новости | `site` | `tbank` | `https://www.tbank.ru/about/news/` |
+| 8 | ВТБ: пресс-центр и IR | `site` | `vtb` | `https://www.vtb.ru/about/press/` |
+| 9 | РБК RSS | `rss` | `rbc` | `https://rssexport.rbc.ru/rbcnews/news/30/full.rss` |
+| 10 | Ведомости RSS: банки | `rss` | `vedomosti` | `https://www.vedomosti.ru/rss/rubric/finance/banks` |
+| 11 | Коммерсантъ: финансы | `site` | `kommersant` | `https://www.kommersant.ru/finance` |
+| 12 | Telegram: Банк России | `telegram` | `telegram` | `https://t.me/centralbank_russia` |
+| 13 | Telegram: Минфин России | `telegram` | `telegram` | `https://t.me/minfin` |
+| 14 | Telegram: Frank Media | `telegram` | `telegram` | `https://t.me/frank_media` |
+| 15 | Telegram: РБК | `telegram` | `telegram` | `https://t.me/rbc_news` |
+| 16 | Telegram: Ведомости | `telegram` | `telegram` | `https://t.me/vedomosti` |
+| 17 | Telegram: Коммерсантъ | `telegram` | `telegram` | `https://t.me/kommersant` |
+| 18 | Telegram: Интерфакс | `telegram` | `telegram` | `https://t.me/interfaxonline` |
+| 19 | Telegram: Банкста | `telegram` | `telegram` | `https://t.me/banksta` |
+| 20 | Telegram: MMI | `telegram` | `telegram` | `https://t.me/russianmacro` |
+| 21 | Telegram: MarketTwits | `telegram` | `telegram` | `https://t.me/markettwits` |
+| 22 | Telegram: РДВ | `telegram` | `telegram` | `https://t.me/AK47pfl` |
+| 23 | Telegram: Финсайд | `telegram` | `telegram` | `https://t.me/finside` |
+| 24 | Росфинмониторинг: информационные сообщения | `site` | `fedsfm` | `https://fedsfm.ru/` |
+| 25 | ФНС России: новости | `site` | `nalog` | `https://www.nalog.gov.ru/rn77/news/activities_fts/` |
+| 26 | Банк России: новости | `api` | `cbr_news` | `https://cbr.ru/news/` |
+| 27 | Ассоциация ФинТех: пресс-центр | `site` | `html` | `https://www.fintechru.org/press-center/` |
+| 28 | Fintech News Singapore RSS | `rss` | `rss` | `https://fintechnews.sg/feed/` |
+| 29 | The Paypers: fintech and payments | `site` | `html` | `https://thepaypers.com/` |
+| 30 | IBS Intelligence RSS | `rss` | `rss` | `https://ibsintelligence.com/feed/` |
+| 31 | TechAfrica News RSS | `rss` | `rss` | `https://techafricanews.com/feed/` |
+| 32 | Biometric Update RSS | `rss` | `rss` | `https://www.biometricupdate.com/feed` |
+| 33 | Cloud Computing News RSS | `rss` | `rss` | `https://www.cloudcomputing-news.net/feed/` |
+| 34 | GlobeNewswire: public companies | `rss` | `rss` | `https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies` |
+| 35 | ECB: press releases RSS | `rss` | `rss` | `https://www.ecb.europa.eu/rss/press.html` |
+| 36 | Korea Herald: business | `site` | `koreaherald` | `https://www.koreaherald.com/business` |
+| 37 | The Fintech Times RSS | `rss` | `rss` | `https://thefintechtimes.com/feed/` |
 
-## Запуск
+## Database
 
-Локально без Docker:
-
-```powershell
-python back\init_db.py     # обнуление базы данных (необязательно)
-python back\app.py         # старт программы
-```
-
-IP:
-
-```text
-http://127.0.0.1:5000
-```
-
-Через Docker:
-
-```powershell
-docker compose up -d --build
-```
-
-## Парсинг
-
-Запустить все активные источники:
-
-```text
-http://127.0.0.1:5000/parser
-```
-
-Окно поиска: последние 1 сутки
-
-Фильтрация: нет
-
-## Источники
-
-| ID | Источник | URL | Тип | Коннектор | Статус | Куда пишется |
-|---:|---|---|---|---|---|---|
-| 2 | Минфин России: пресс-центр | `https://minfin.gov.ru/ru/press-center/` | `site` | `minfin` | активен | `raw_news` |
-| 3 | Росстат: национальные счета | `https://rosstat.gov.ru/statistics/accounts` | `site` | `rosstat` | активен, `verify_ssl=false` | `raw_news` |
-| 4 | MOEX ISS shares | `https://iss.moex.com/iss/engines/stock/markets/shares/securities.json` | `api` | `moex` | активен | `moex_daily_stats` |
-| 5 | Альфа-Банк: новости | `https://alfabank.ru/news/t/` | `site` | `alfabank` | активен | `raw_news` |
-| 6 | Сбер: пресс-релизы | `https://www.sberbank.com/ru/news-and-media/press-releases` | `site` | `sber` | активен | `raw_news` |
-| 7 | Т-Банк: новости | `https://www.tbank.ru/about/news/` | `site` | `tbank` | активен | `raw_news` |
-| 8 | ВТБ: пресс-центр и IR | `https://www.vtb.ru/about/press/` | `site` | `vtb` | активен | `raw_news` |
-| 9 | РБК RSS | `https://rssexport.rbc.ru/rbcnews/news/30/full.rss` | `rss` | `rbc` | активен | `raw_news` |
-| 10 | Ведомости RSS: банки | `https://www.vedomosti.ru/rss/rubric/finance/banks` | `rss` | `vedomosti` | активен | `raw_news` |
-| 11 | Коммерсантъ: финансы | `https://www.kommersant.ru/finance` | `site` | `kommersant` | активен | `raw_news` |
-| 24 | Росфинмониторинг: информационные сообщения | `https://fedsfm.ru/` | `site` | `fedsfm` | активен, `verify_ssl=false` | `raw_news` |
-| 25 | ФНС России: новости | `https://www.nalog.gov.ru/rn77/news/activities_fts/` | `site` | `nalog` | активен | `raw_news` |
-| 26 | Банк России: новости | `https://cbr.ru/news/` | `api` | `cbr_news` | активен | `raw_news` |
-| 27 | Ассоциация ФинТех: пресс-центр | `https://www.fintechru.org/press-center/` | `site` | `html` | активен | `raw_news` |
-| 28 | Fintech News Singapore RSS | `https://fintechnews.sg/feed/` | `rss` | `rss` | активен | `raw_news` |
-| 29 | The Paypers: fintech and payments | `https://thepaypers.com/` | `site` | `html` | активен | `raw_news` |
-| 30 | IBS Intelligence RSS | `https://ibsintelligence.com/feed/` | `rss` | `rss` | активен | `raw_news` |
-| 31 | TechAfrica News RSS | `https://techafricanews.com/feed/` | `rss` | `rss` | активен | `raw_news` |
-| 32 | Biometric Update RSS | `https://www.biometricupdate.com/feed` | `rss` | `rss` | активен | `raw_news` |
-| 33 | Cloud Computing News RSS | `https://www.cloudcomputing-news.net/feed/` | `rss` | `rss` | активен | `raw_news` |
-| 34 | GlobeNewswire: public companies | `https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies` | `rss` | `rss` | активен | `raw_news` |
-| 35 | ECB: press releases RSS | `https://www.ecb.europa.eu/rss/press.html` | `rss` | `rss` | активен | `raw_news` |
-| 36 | Korea Herald: business | `https://www.koreaherald.com/business` | `site` | `koreaherald` | активен | `raw_news` |
-| 37 | The Fintech Times RSS | `https://thefintechtimes.com/feed/` | `rss` | `rss` | активен | `raw_news` |
-
-## База Данных
+SQLite DB: `data/app.db` локально, `/opt/myapp/data/app.db` на сервере.
 
 ### `sources`
 
-Источники, которые использует парсер.
-
-При `python back\init_db.py` создаётся стартовый набор источников. В `parser_config` лежит имя коннектора, период поиска и параметры конкретного источника. Для Росстата и Росфинмониторинга временно задано `verify_ssl=false`, потому что локальная проверка цепочки сертификата может падать.
+Список источников для parser.
 
 | Поле | Описание |
 | --- | --- |
 | `id` | ID источника |
 | `name` | Название источника |
-| `url` | Ссылка, которую читает парсер |
-| `source_type` | Грубый тип источника: `rss`, `site`, `api`, `telegram`; конкретный коннектор хранится в `parser_config.connector` |
-| `is_active` | Использовать ли источник |
-| `parse_frequency_minutes` | Как часто источник нужно проверять |
-| `parser_config` | JSON-строка с настройками селекторов парсера |
-| `last_parsed_at` | Когда источник последний раз проверяли |
-| `created_at` | Когда источник добавлен |
-| `updated_at` | Когда источник обновлен |
+| `url` | URL источника |
+| `source_type` | `rss`, `site`, `api`, `telegram` |
+| `is_active` | Используется ли источник |
+| `parse_frequency_minutes` | Частота проверки |
+| `parser_config` | JSON с коннектором и настройками парсинга |
+| `last_parsed_at` | Последняя проверка |
+| `created_at`, `updated_at` | Служебные даты |
 
 ### `raw_news`
 
-Сырые новости, найденные парсером.
+Сырые публикации, найденные parser.
 
 | Поле | Описание |
 | --- | --- |
-| `id` | ID новости |
+| `id` | ID публикации |
 | `source_id` | Ссылка на `sources.id` |
-| `url` | Ссылка на конкретную новость |
-| `title` | Заголовок новости |
-| `text` | Сырой текст новости |
-| `published_at` | Дата публикации новости |
-| `parsed_at` | Когда новость была найдена парсером |
+| `url` | URL публикации, уникальный |
+| `title` | Заголовок |
+| `text` | Сырой текст |
+| `published_at` | Дата публикации |
+| `parsed_at` | Когда parser нашёл запись |
 | `status` | `new`, `processing`, `processed`, `skipped`, `error` |
-| `content_hash` | Хеш текста/заголовка для поиска дублей |
-| `raw_data` | Дополнительные данные парсера в JSON-строке |
-| `error_message` | Текст ошибки, если обработка упала |
+| `content_hash` | Хеш текста/заголовка для дублей |
+| `raw_data` | JSON с дополнительными данными коннектора |
+| `error_message` | Ошибка обработки моделью |
 
-### `moex_daily_stats`
-
-Дневная агрегированная статистика MOEX ISS. Одна строка соответствует одному торговому дню.
-
-| Поле | Описание |
-| --- | --- |
-| `id` | ID записи |
-| `source_id` | Ссылка на `sources.id` |
-| `trade_date` | Дата торгов |
-| `securities_count` | Сколько инструментов попало в дневную сводку |
-| `traded_securities_count` | Сколько инструментов реально торговалось |
-| `total_value` | Суммарный оборот |
-| `total_value_usd` | Суммарный оборот в USD, если MOEX отдал это поле |
-| `total_volume` | Суммарный объем |
-| `total_trades` | Суммарное количество сделок |
-| `average_last` | Среднее значение последней цены по инструментам, где оно есть |
-| `average_marketprice` | Средняя рыночная цена по инструментам, где она есть |
-| `top_secid` | Инструмент с максимальным оборотом |
-| `top_shortname` | Короткое название инструмента с максимальным оборотом |
-| `top_value` | Оборот инструмента-лидера |
-| `top_volume_secid` | Инструмент с максимальным объемом |
-| `top_volume_shortname` | Короткое название инструмента с максимальным объемом |
-| `top_volume` | Объем инструмента-лидера |
-| `top_trades_secid` | Инструмент с максимальным количеством сделок |
-| `top_trades_shortname` | Короткое название инструмента с максимумом сделок |
-| `top_trades` | Количество сделок инструмента-лидера |
-| `moex_systime` | Время последнего обновления в данных MOEX |
-| `raw_data` | Сырые строки MOEX ISS, из которых собрана дневная сводка |
-| `fetched_at` | Когда запись получена |
+`model` берёт только строки со статусом `new`. При успехе ставит `processed`, при ошибке `error`.
 
 ### `signals`
 
-Готовые чистые карточки после обработки моделью.
+Готовые карточки после model.
 
 | Поле | Описание |
 | --- | --- |
 | `id` | ID сигнала |
-| `headline` | Заголовок сигнала |
-| `hotness` | Важность сигнала от 1 до 5 |
-| `why_now` | Почему это важно сейчас |
-| `category` | Категория сигнала: `Инвестиции и рынки`, `Корпоративные финансы и сделки`, `Финансовые результаты`, `Макроэкономика и статистика` |
-| `sources` | JSON-массив источников сигнала |
-| `summary` | Выжимка из новости |
-| `draft` | Комментарии, ошибки, сомнения и другие заметки по сигналу |
+| `headline` | Короткий заголовок |
+| `hotness` | Важность 1-5 |
+| `why_now` | Почему важно сейчас; для мусора `--`, для сухих отчётов `Отчёт` |
+| `category` | `Инвестиции и рынки`, `Корпоративные финансы и сделки`, `Финансовые результаты`, `Макроэкономика и статистика` |
+| `sources` | ID исходной публикации из `raw_news.id` |
+| `summary` | Короткая выжимка; пусто для `hotness=1` |
+| `draft` | Пусто по умолчанию; только ошибки/сомнения/ограничения |
 
-## Telegram-Каналы
+### `moex_daily_stats`
 
-Окно поиска: последние сутки.
+Дневная агрегированная статистика MOEX.
 
-Кроме отдельных Telegram-источников ниже, коннекторы Альфа-Банка и Сбера дополнительно читают официальные Telegram-каналы `https://t.me/alfabank` и `https://t.me/sberbank` параллельно с основными сайтами.
+| Поле | Описание |
+| --- | --- |
+| `source_id` | Ссылка на `sources.id` |
+| `trade_date` | Дата торгов |
+| `securities_count`, `traded_securities_count` | Количество инструментов |
+| `total_value`, `total_value_usd`, `total_volume`, `total_trades` | Обороты/объёмы/сделки |
+| `average_last`, `average_marketprice` | Средние цены |
+| `top_*` | Инструменты-лидеры по обороту, объёму и сделкам |
+| `moex_systime`, `raw_data`, `fetched_at` | Служебные данные |
 
-Официальные источники:
+### Runtime Files
 
-| ID | Канал | URL | Назначение |
-|---:|---|---|---|
-| 12 | Банк России | `https://t.me/centralbank_russia` | первоисточник, регулятор |
-| 13 | Минфин России | `https://t.me/minfin` | первоисточник по бюджету и финансам |
-| 14 | Frank Media | `https://t.me/frank_media` | профильное банковское СМИ |
-| 15 | РБК | `https://t.me/rbc_news` | крупное СМИ |
-| 16 | Ведомости | `https://t.me/vedomosti` | деловое СМИ |
-| 17 | Коммерсантъ | `https://t.me/kommersant` | деловое СМИ |
-| 18 | Интерфакс | `https://t.me/interfaxonline` | агентство для подтверждения |
+Лежат рядом с БД и не коммитятся:
 
-Неофициальные источники:
+```text
+parser.lock
+parser_manual_throttle.json
+update_status.json
+```
 
-| ID | Канал | URL | Как использовать |
-|---:|---|---|---|
-| 19 | Банкста | `https://t.me/banksta` | ранние сигналы, инсайды и оценки нужно проверять |
-| 20 | MMI | `https://t.me/russianmacro` | макроаналитика, не новостной первоисточник |
-| 21 | MarketTwits | `https://t.me/markettwits` | быстрые рыночные сигналы, нужно перепроверять |
-| 22 | РДВ | `https://t.me/AK47pfl` | инвестиционные идеи и оценки, не транслировать как факт |
-| 23 | Финсайд | `https://t.me/finside` | слухи и инсайды, только как сигнал для проверки |
+## Environment
+
+```env
+DB_PATH=/app/data/app.db
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_TIMEOUT_SECONDS=60
+OPENROUTER_MAX_RETRIES=3
+OPENROUTER_RETRY_SECONDS=20
+OPENROUTER_REQUEST_DELAY_SECONDS=0
+```
+
+## Local Run
+
+```powershell
+python back\init_db.py
+python back\app.py
+```
+
+Docker:
+
+```powershell
+docker compose up -d --build
+docker compose logs -f backend
+```
+
+## Production
+
+Production compose exposes backend only on localhost:
+
+```text
+127.0.0.1:${BACKEND_PORT}:5000
+```
+
+Runtime data is mounted to `/app/data`; production DB path:
+
+```text
+/opt/myapp/data/app.db
+```
+
+Deploy:
+
+```bash
+cd /opt/myapp
+git fetch origin main
+git reset --hard origin/main
+mkdir -p data
+docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+docker image prune -f
+```
+
+Do not remove `/opt/myapp/data` and do not run `docker compose down -v`.
+
+## Nginx
+
+```nginx
+server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```

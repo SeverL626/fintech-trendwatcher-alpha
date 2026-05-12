@@ -17,4 +17,7 @@ data/*.db-journal
 data/parser.lock
 data/parser_manual_throttle.json
 data/parser_status.json
+data/model_status.json
+data/update_status.json
+data/server_logs/
 *.log

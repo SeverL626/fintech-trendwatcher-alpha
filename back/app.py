@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 try:
     from back.init_db import DB_PATH
@@ -17,12 +17,17 @@ except ModuleNotFoundError:
 MSK_TZ = ZoneInfo("Europe/Moscow")
 PARSER_SCHEDULE_HOURS = (0, 3, 6, 9, 12, 15, 18, 21)
 PARSER_PERIOD_HOURS = 3
-PARSER_LOCK_STALE_SECONDS = 6 * 60 * 60
 PARSER_LOCK_PATH = Path(DB_PATH).parent / "parser.lock"
 PARSER_MANUAL_COOLDOWN_SECONDS = 60 * 60
 PARSER_MANUAL_THROTTLE_PATH = Path(DB_PATH).parent / "parser_manual_throttle.json"
 PARSER_TIMEOUT_SECONDS = 60 * 60
 PARSER_STATUS_PATH = Path(DB_PATH).parent / "parser_status.json"
+MODEL_TIMEOUT_SECONDS = 60 * 60
+MODEL_STATUS_PATH = Path(DB_PATH).parent / "model_status.json"
+MODEL_OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it")
+MODEL_MAX_REQUESTS_PER_RUN = None
+UPDATE_TIMEOUT_SECONDS = 60 * 60
+UPDATE_STATUS_PATH = Path(DB_PATH).parent / "update_status.json"
 
 app = Flask(__name__)
 app.config["DB_PATH"] = DB_PATH
@@ -37,32 +42,49 @@ _scheduler_start_lock = threading.Lock()
 def hello():
     return jsonify({
         "ok": True,
-        "message": "Welcome to the Alfa-HackItOn backend!",
+        "service": "Fintech Trendwatcher",
         "current_time": {
             "timezone": "Europe/Moscow",
             "iso": now_msk().isoformat(timespec="seconds"),
         },
-        "parser_update_settings": get_parser_update_settings(),
-        "parser_status": get_parser_status(),
-        "routes": ["/parser", "/parser/status"],
+        "update": get_update_overview(),
+        "routes": [
+            "/update",
+            "/update/status",
+            "/signals",
+        ],
     })
 
 
-@app.route("/parser")
-def run_parser():
-    parser_result, status_code = start_parser_job_background("manual")
+@app.route("/update")
+def run_update():
+    update_result, status_code = start_update_job_background("manual")
     return jsonify({
         "ok": status_code == 202,
-        "parser": parser_result,
+        "update": update_result,
     }), status_code
 
 
-@app.route("/parser/status")
-def parser_status():
-    status = get_parser_status()
+@app.route("/update/status")
+def update_status():
+    status = get_update_status()
     return jsonify({
         "ok": status.get("state") not in {"failed", "timed_out"},
-        "parser": status,
+        "update": status,
+    })
+
+
+@app.route("/signals")
+def signals():
+    limit = request.args.get("limit", 20)
+    try:
+        from model.signal_processor import list_signals
+    except ModuleNotFoundError:
+        from signal_processor import list_signals
+
+    return jsonify({
+        "ok": True,
+        "signals": list_signals(app.config["DB_PATH"], limit),
     })
 
 
@@ -75,6 +97,24 @@ def run_parser_from_db(db_path):
     return parser_runner(db_path)
 
 
+def run_model_from_db(db_path, limit=None):
+    try:
+        from model.signal_processor import process_new_raw_news
+    except ModuleNotFoundError:
+        from signal_processor import process_new_raw_news
+
+    return process_new_raw_news(db_path, limit)
+
+
+def ensure_model_configured():
+    try:
+        from model.signal_processor import ensure_model_configured as check_configured
+    except ModuleNotFoundError:
+        from signal_processor import ensure_model_configured as check_configured
+
+    return check_configured()
+
+
 def now_msk():
     return datetime.now(MSK_TZ)
 
@@ -82,14 +122,491 @@ def now_msk():
 def get_parser_update_settings():
     current_time = now_msk()
     return {
+        "enabled": False,
+        "message": "Parser runs only as the first stage of /update",
+        "timezone": "Europe/Moscow",
+        "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
+        "period_hours": PARSER_PERIOD_HOURS,
+        "timeout_minutes": PARSER_TIMEOUT_SECONDS // 60,
+        "next_run_at": get_next_parser_run_at(current_time).isoformat(timespec="seconds"),
+    }
+
+
+def get_model_update_settings():
+    return {
+        "enabled": False,
+        "message": "Model runs only as the second stage of /update",
+        "provider": "openrouter",
+        "mode": "single_model",
+        "model": MODEL_OPENROUTER_MODEL,
+        "max_requests_per_run": "all",
+        "input_status": "new",
+        "writes_to": "signals",
+        "updates_raw_news_statuses": ["processing", "processed", "error"],
+        "manual_start": None,
+        "message": "Model stage runs only as part of /update",
+        "status_url": None,
+        "signals_url": "/signals",
+        "timeout_minutes": MODEL_TIMEOUT_SECONDS // 60,
+        "shared_lock": {
+            "path": str(PARSER_LOCK_PATH),
+            "message": "Parser and model cannot run at the same time",
+        },
+    }
+
+
+def get_update_settings():
+    current_time = now_msk()
+    return {
         "enabled": True,
         "timezone": "Europe/Moscow",
         "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
         "period_hours": PARSER_PERIOD_HOURS,
-        "manual_cooldown_minutes": PARSER_MANUAL_COOLDOWN_SECONDS // 60,
-        "timeout_minutes": PARSER_TIMEOUT_SECONDS // 60,
+        "timeout_minutes": UPDATE_TIMEOUT_SECONDS // 60,
+        "stages": ["parser", "model"],
+        "model_max_requests_per_run": "all",
         "next_run_at": get_next_parser_run_at(current_time).isoformat(timespec="seconds"),
+        "manual_start": "/update",
+        "status_url": "/update/status",
     }
+
+
+def get_update_overview():
+    return {
+        "enabled": True,
+        "timezone": "Europe/Moscow",
+        "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
+        "period_hours": PARSER_PERIOD_HOURS,
+        "next_run_at": get_next_parser_run_at().isoformat(timespec="seconds"),
+        "timeout_minutes": UPDATE_TIMEOUT_SECONDS // 60,
+        "stages": [
+            {
+                "name": "parser",
+                "description": "Collects new raw_news from active sources",
+            },
+            {
+                "name": "model",
+                "description": "Processes new raw_news into signals",
+                "provider": "openrouter",
+                "model": MODEL_OPENROUTER_MODEL,
+                "max_requests_per_run": "all",
+            },
+        ],
+        "manual_start": "/update",
+        "status_url": "/update/status",
+    }
+
+
+def start_update_job_background(trigger):
+    if trigger == "manual":
+        cooldown_response = get_manual_parser_cooldown_response()
+        if cooldown_response:
+            cooldown_response["status_url"] = "/update/status"
+            return cooldown_response, 429
+
+    try:
+        ensure_model_configured()
+    except Exception as error:
+        return {
+            "status": "error",
+            "message": str(error),
+            "trigger": trigger,
+            "status_url": "/update/status",
+        }, 500
+
+    lock_fd = acquire_parser_lock("update")
+    if lock_fd is None:
+        return {
+            "status": "busy",
+            "message": "Update is already running",
+            "trigger": trigger,
+            "status_url": "/update/status",
+        }, 409
+
+    started_at = now_msk()
+    try:
+        if trigger == "manual":
+            save_manual_parser_started_at(started_at)
+        save_update_running_status(trigger, started_at)
+    except OSError as error:
+        release_parser_lock(lock_fd)
+        return {
+            "status": "error",
+            "message": f"Failed to save update state: {error}",
+            "trigger": trigger,
+            "status_url": "/update/status",
+        }, 500
+
+    thread = threading.Thread(
+        target=run_update_job_background,
+        args=(trigger, lock_fd, started_at),
+        name=f"update-{trigger}",
+        daemon=True,
+    )
+    thread.start()
+
+    return {
+        "status": "Started",
+        "message": "Update started in background",
+        "trigger": trigger,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "status_url": "/update/status",
+    }, 202
+
+
+def run_update_job_background(trigger, lock_fd, started_at):
+    try:
+        result = run_update_job_with_lock(trigger, started_at)
+        parser_summary = result.get("summary", {}).get("parser", {})
+        model_summary = result.get("summary", {}).get("model", {})
+        print(
+            f"Update {trigger} finished at {result['finished_at']} "
+            f"with parser_created={parser_summary.get('created', 0)} "
+            f"signals_created={model_summary.get('signals_created', 0)}",
+            flush=True,
+        )
+    except Exception as error:
+        finished_at = now_msk()
+        save_update_failed_status(trigger, started_at, finished_at, error)
+        print(
+            f"Update {trigger} failed at {finished_at.isoformat(timespec='seconds')}: {error}",
+            flush=True,
+        )
+    finally:
+        release_parser_lock(lock_fd)
+
+
+def run_update_job_with_lock(trigger, started_at):
+    save_update_stage_status(trigger, started_at, "parser", "running")
+    parser_started_at = now_msk()
+    save_parser_running_status(trigger, parser_started_at)
+    try:
+        parser_result = run_parser_from_db(app.config["DB_PATH"])
+    except Exception as error:
+        save_update_stage_status(
+            trigger,
+            started_at,
+            "parser",
+            "failed",
+            started_at=parser_started_at,
+            finished_at=now_msk(),
+            error=error,
+        )
+        raise
+
+    parser_finished_at = now_msk()
+    parser_summary = make_parser_stage_summary(parser_result)
+    save_update_stage_status(
+        trigger,
+        started_at,
+        "parser",
+        "finished",
+        started_at=parser_started_at,
+        finished_at=parser_finished_at,
+        summary=parser_summary,
+        result=parser_result,
+    )
+    save_parser_finished_status(trigger, parser_started_at, parser_finished_at, parser_result)
+
+    save_update_stage_status(trigger, started_at, "model", "running")
+    model_started_at = now_msk()
+    save_model_running_status(model_started_at, None)
+    try:
+        model_result = run_model_from_db(app.config["DB_PATH"], None)
+    except Exception as error:
+        save_update_stage_status(
+            trigger,
+            started_at,
+            "model",
+            "failed",
+            started_at=model_started_at,
+            finished_at=now_msk(),
+            error=error,
+        )
+        raise
+
+    model_finished_at = now_msk()
+    model_summary = make_model_stage_summary(model_result)
+    save_update_stage_status(
+        trigger,
+        started_at,
+        "model",
+        "finished",
+        started_at=model_started_at,
+        finished_at=model_finished_at,
+        summary=model_summary,
+        result=model_result,
+    )
+    save_model_finished_status(model_started_at, model_finished_at, model_result, None)
+
+    finished_at = now_msk()
+    result = {
+        "state": "finished",
+        "message": "Update finished",
+        "trigger": trigger,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
+        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        "summary": {
+            "parser": parser_summary,
+            "model": model_summary,
+        },
+        "stages": {
+            "parser": {
+                "state": "finished",
+                "summary": parser_summary,
+            },
+            "model": {
+                "state": "finished",
+                "summary": model_summary,
+            },
+        },
+    }
+    save_update_status(result)
+    return result
+
+
+def get_update_status():
+    status = load_update_status()
+    if not status:
+        return {
+            "state": "idle",
+            "message": "Update has not been started yet",
+            "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        }
+
+    if status.get("state") == "running":
+        started_at = parse_msk_datetime(status.get("started_at"))
+        if started_at:
+            duration_seconds = max(0, int((now_msk() - started_at).total_seconds()))
+            status["duration_seconds"] = duration_seconds
+            if duration_seconds > UPDATE_TIMEOUT_SECONDS:
+                status["state"] = "timed_out"
+                status["message"] = "Update exceeded the 1 hour timeout"
+                status["timeout_seconds"] = UPDATE_TIMEOUT_SECONDS
+                save_update_status(status)
+
+    return status
+
+
+def load_update_status():
+    try:
+        return json.loads(UPDATE_STATUS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def save_update_running_status(trigger, started_at):
+    save_update_status({
+        "state": "running",
+        "message": "Update is running",
+        "trigger": trigger,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": None,
+        "duration_seconds": 0,
+        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        "summary": {},
+        "stages": {
+            "parser": {"state": "pending", "message": "Parser has not started yet"},
+            "model": {"state": "pending", "message": "Model has not started yet"},
+        },
+    })
+
+
+def save_update_stage_status(
+    trigger,
+    update_started_at,
+    stage,
+    state,
+    started_at=None,
+    finished_at=None,
+    summary=None,
+    result=None,
+    error=None,
+):
+    status = load_update_status() or {}
+    stages = status.get("stages") or {}
+    stage_status = {
+        "state": state,
+        "message": f"{stage} {state}",
+    }
+    if started_at:
+        stage_status["started_at"] = started_at.isoformat(timespec="seconds")
+    if finished_at:
+        stage_status["finished_at"] = finished_at.isoformat(timespec="seconds")
+        if started_at:
+            stage_status["duration_seconds"] = max(0, int((finished_at - started_at).total_seconds()))
+    if summary is not None:
+        stage_status["summary"] = summary
+    if result is not None:
+        stage_status["result"] = compact_stage_result(stage, result)
+    if error is not None:
+        stage_status["error"] = str(error)
+
+    stages[stage] = stage_status
+    status.update({
+        "state": "running",
+        "message": f"Update is running: {stage} {state}",
+        "trigger": trigger,
+        "started_at": update_started_at.isoformat(timespec="seconds"),
+        "finished_at": None,
+        "duration_seconds": max(0, int((now_msk() - update_started_at).total_seconds())),
+        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        "stages": stages,
+    })
+    save_update_status(status)
+
+
+def save_update_failed_status(trigger, started_at, finished_at, error):
+    status = load_update_status() or {}
+    status.update({
+        "state": "failed",
+        "message": "Update failed",
+        "trigger": trigger,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
+        "error": str(error),
+        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+    })
+    save_update_status(status)
+
+
+def save_update_status(status):
+    UPDATE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UPDATE_STATUS_PATH.write_text(
+        json.dumps(status, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def make_parser_stage_summary(result):
+    return {
+        "sources": result.get("sources", 0),
+        "created": result.get("created", 0),
+        "duplicates": result.get("duplicates", 0),
+        "skipped": result.get("skipped", 0),
+        "errors": result.get("errors", 0),
+        "empty_sources": result.get("empty_sources", 0),
+    }
+
+
+def make_model_stage_summary(result):
+    openrouter_usage = result.get("openrouter") or {}
+    return {
+        "processed_items": result.get("processed_items", 0),
+        "signals_created": result.get("signals_created", 0),
+        "errors": result.get("errors", 0),
+        "rate_limited": result.get("rate_limited", False),
+        "run_cost": openrouter_usage.get("run_cost"),
+        "requests_sent": openrouter_usage.get("requests_sent"),
+    }
+
+
+def compact_stage_result(stage, result):
+    if stage == "parser":
+        return make_parser_stage_summary(result)
+    if stage == "model":
+        return make_model_stage_summary(result)
+    return result
+
+
+def get_model_status():
+    status = load_model_status()
+    if not status:
+        return {
+            "state": "idle",
+            "message": "Model processing has not been started yet",
+            "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+        }
+
+    if status.get("state") == "running":
+        started_at = parse_msk_datetime(status.get("started_at"))
+        if started_at:
+            duration_seconds = max(0, int((now_msk() - started_at).total_seconds()))
+            status["duration_seconds"] = duration_seconds
+            if duration_seconds > MODEL_TIMEOUT_SECONDS:
+                status["state"] = "timed_out"
+                status["message"] = "Model processing exceeded the 1 hour timeout"
+                status["timeout_seconds"] = MODEL_TIMEOUT_SECONDS
+                save_model_status(status)
+
+    return status
+
+
+def load_model_status():
+    try:
+        return json.loads(MODEL_STATUS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def save_model_running_status(started_at, limit):
+    save_model_status({
+        "state": "running",
+        "message": "Model processing is running",
+        "trigger": "manual",
+        "requested_limit": limit or "all",
+        "max_requests_per_run": "all",
+        "model": MODEL_OPENROUTER_MODEL,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": None,
+        "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+    })
+
+
+def save_model_finished_status(started_at, finished_at, result, limit):
+    rate_limited = bool(result.get("rate_limited"))
+    errors = int(result.get("errors") or 0)
+    openrouter_usage = result.get("openrouter") or {}
+    save_model_status({
+        "state": "rate_limited" if rate_limited else "finished",
+        "message": (
+            "Model processing stopped because OpenRouter rate limit was reached"
+            if rate_limited else "Model processing finished"
+        ),
+        "trigger": "manual",
+        "requested_limit": limit or "all",
+        "effective_limit": result.get("requested_limit"),
+        "max_requests_per_run": result.get("max_requests_per_run", "all"),
+        "model": result.get("model", MODEL_OPENROUTER_MODEL),
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
+        "processed_items": result.get("processed_items"),
+        "signals_created": result.get("signals_created"),
+        "skipped": result.get("skipped", 0),
+        "errors": errors,
+        "rate_limited": rate_limited,
+        "openrouter_run_cost": openrouter_usage.get("run_cost"),
+        "openrouter": openrouter_usage,
+        "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+    })
+
+
+def save_model_failed_status(started_at, finished_at, error, limit):
+    save_model_status({
+        "state": "failed",
+        "message": "Model processing failed",
+        "trigger": "manual",
+        "requested_limit": limit or "all",
+        "max_requests_per_run": "all",
+        "model": MODEL_OPENROUTER_MODEL,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
+        "error": str(error),
+        "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+    })
+
+
+def save_model_status(status):
+    MODEL_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_STATUS_PATH.write_text(
+        json.dumps(status, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def get_next_parser_run_at(current_time=None):
@@ -104,80 +621,6 @@ def get_next_parser_run_at(current_time=None):
     return datetime.combine(tomorrow, datetime.min.time(), tzinfo=MSK_TZ).replace(
         hour=PARSER_SCHEDULE_HOURS[0]
     )
-
-
-def run_parser_job(trigger):
-    lock_fd = acquire_parser_lock(trigger)
-    if lock_fd is None:
-        return {
-            "status": "busy",
-            "message": "Parser is already running",
-            "trigger": trigger,
-        }, 409
-
-    started_at = now_msk()
-    save_parser_running_status(trigger, started_at)
-    return run_parser_job_with_lock(trigger, lock_fd, started_at)
-
-
-def run_parser_job_with_lock(trigger, lock_fd, started_at):
-    try:
-        result = run_parser_from_db(app.config["DB_PATH"])
-        finished_at = now_msk()
-        result["trigger"] = trigger
-        result["started_at"] = started_at.isoformat(timespec="seconds")
-        result["finished_at"] = finished_at.isoformat(timespec="seconds")
-        save_parser_finished_status(trigger, started_at, finished_at, result)
-        return result, 200
-    except Exception as error:
-        save_parser_failed_status(trigger, started_at, now_msk(), error)
-        raise
-    finally:
-        release_parser_lock(lock_fd)
-
-
-def start_parser_job_background(trigger):
-    if trigger == "manual":
-        cooldown_response = get_manual_parser_cooldown_response()
-        if cooldown_response:
-            return cooldown_response, 429
-
-    lock_fd = acquire_parser_lock(trigger)
-    if lock_fd is None:
-        return {
-            "status": "busy",
-            "message": "Parser is already running",
-            "trigger": trigger,
-        }, 409
-
-    started_at = now_msk()
-    if trigger == "manual":
-        try:
-            save_manual_parser_started_at(started_at)
-            save_parser_running_status(trigger, started_at)
-        except OSError as error:
-            release_parser_lock(lock_fd)
-            return {
-                "status": "error",
-                "message": f"Failed to save parser state: {error}",
-                "trigger": trigger,
-            }, 500
-
-    thread = threading.Thread(
-        target=run_parser_job_background,
-        args=(trigger, lock_fd, started_at),
-        name=f"parser-{trigger}",
-        daemon=True,
-    )
-    thread.start()
-
-    return {
-        "status": "Started",
-        "message": "Parser started in background",
-        "trigger": trigger,
-        "started_at": started_at.isoformat(timespec="seconds"),
-        "status_url": "/parser/status",
-    }, 202
 
 
 def get_parser_status():
@@ -321,22 +764,6 @@ def save_manual_parser_started_at(started_at):
     )
 
 
-def run_parser_job_background(trigger, lock_fd, started_at):
-    try:
-        result, status_code = run_parser_job_with_lock(trigger, lock_fd, started_at)
-        if status_code == 200:
-            print(
-                f"Parser {trigger} update finished at {result['finished_at']} "
-                f"with created={result.get('created', 0)} errors={result.get('errors', 0)}",
-                flush=True,
-            )
-    except Exception as error:
-        print(
-            f"Parser {trigger} update failed at {now_msk().isoformat(timespec='seconds')}: {error}",
-            flush=True,
-        )
-
-
 def acquire_parser_lock(trigger):
     PARSER_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     remove_stale_parser_lock()
@@ -369,11 +796,37 @@ def remove_stale_parser_lock():
     except FileNotFoundError:
         return
 
-    if lock_age_seconds > PARSER_LOCK_STALE_SECONDS:
-        try:
-            PARSER_LOCK_PATH.unlink()
-        except FileNotFoundError:
-            pass
+    if lock_age_seconds <= UPDATE_TIMEOUT_SECONDS:
+        return
+
+    lock_data = load_lock_data()
+    pid = lock_data.get("pid") if isinstance(lock_data, dict) else None
+    if pid and is_pid_running(pid):
+        return
+
+    try:
+        PARSER_LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def load_lock_data():
+    try:
+        return json.loads(PARSER_LOCK_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def is_pid_running(pid):
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def start_parser_scheduler():
@@ -398,22 +851,21 @@ def parser_scheduler_loop():
             sleep_seconds = max(1, (next_run_at - now_msk()).total_seconds())
             time.sleep(sleep_seconds)
 
-            result, status_code = run_parser_job("auto")
-            if status_code == 200:
+            result, status_code = start_update_job_background("auto")
+            if status_code == 202:
                 print(
-                    f"Parser auto update finished at {result['finished_at']} "
-                    f"with created={result.get('created', 0)} errors={result.get('errors', 0)}",
+                    f"Update auto started at {result['started_at']}",
                     flush=True,
                 )
             else:
                 print(
-                    f"Parser auto update skipped at {now_msk().isoformat(timespec='seconds')}: "
+                    f"Update auto skipped at {now_msk().isoformat(timespec='seconds')}: "
                     f"{result.get('message')}",
                     flush=True,
                 )
         except Exception as error:
             print(
-                f"Parser auto update failed at {now_msk().isoformat(timespec='seconds')}: {error}",
+                f"Update auto failed at {now_msk().isoformat(timespec='seconds')}: {error}",
                 flush=True,
             )
 
