@@ -18,8 +18,9 @@ MSK_TZ = ZoneInfo("Europe/Moscow")
 PARSER_SCHEDULE_HOURS = (0, 3, 6, 9, 12, 15, 18, 21)
 PARSER_PERIOD_HOURS = 3
 PARSER_LOCK_PATH = Path(DB_PATH).parent / "parser.lock"
-PARSER_MANUAL_COOLDOWN_SECONDS = 60 * 60
-PARSER_MANUAL_THROTTLE_PATH = Path(DB_PATH).parent / "parser_manual_throttle.json"
+UPDATE_MANUAL_COOLDOWN_SECONDS = 60 * 60
+UPDATE_LAST_START_PATH = Path(DB_PATH).parent / "update_last_start.json"
+LEGACY_PARSER_MANUAL_THROTTLE_PATH = Path(DB_PATH).parent / "parser_manual_throttle.json"
 PARSER_TIMEOUT_SECONDS = 60 * 60
 PARSER_STATUS_PATH = Path(DB_PATH).parent / "parser_status.json"
 MODEL_TIMEOUT_SECONDS = 60 * 60
@@ -165,6 +166,9 @@ def get_update_settings():
         "stale_lock_after_minutes": UPDATE_TIMEOUT_SECONDS // 60,
         "stages": ["parser", "model"],
         "model_max_requests_per_run": "all",
+        "manual_cooldown_minutes": UPDATE_MANUAL_COOLDOWN_SECONDS // 60,
+        "manual_cooldown_scope": "previous update start, manual or auto",
+        "auto_skips_only_when_running": True,
         "next_run_at": get_next_parser_run_at(current_time).isoformat(timespec="seconds"),
         "manual_start": "/update",
         "status_url": "/update/status",
@@ -179,6 +183,9 @@ def get_update_overview():
         "period_hours": PARSER_PERIOD_HOURS,
         "next_run_at": get_next_parser_run_at().isoformat(timespec="seconds"),
         "stale_lock_after_minutes": UPDATE_TIMEOUT_SECONDS // 60,
+        "manual_cooldown_minutes": UPDATE_MANUAL_COOLDOWN_SECONDS // 60,
+        "manual_cooldown_scope": "previous update start, manual or auto",
+        "auto_skips_only_when_running": True,
         "stages": [
             {
                 "name": "parser",
@@ -198,22 +205,6 @@ def get_update_overview():
 
 
 def start_update_job_background(trigger):
-    if trigger == "manual":
-        cooldown_response = get_manual_parser_cooldown_response()
-        if cooldown_response:
-            cooldown_response["status_url"] = "/update/status"
-            return cooldown_response, 429
-
-    try:
-        ensure_model_configured()
-    except Exception as error:
-        return {
-            "status": "error",
-            "message": str(error),
-            "trigger": trigger,
-            "status_url": "/update/status",
-        }, 500
-
     lock_fd = acquire_parser_lock("update")
     if lock_fd is None:
         return {
@@ -223,10 +214,27 @@ def start_update_job_background(trigger):
             "status_url": "/update/status",
         }, 409
 
+    if trigger == "manual":
+        cooldown_response = get_manual_update_cooldown_response()
+        if cooldown_response:
+            cooldown_response["status_url"] = "/update/status"
+            release_parser_lock(lock_fd)
+            return cooldown_response, 429
+
+    try:
+        ensure_model_configured()
+    except Exception as error:
+        release_parser_lock(lock_fd)
+        return {
+            "status": "error",
+            "message": str(error),
+            "trigger": trigger,
+            "status_url": "/update/status",
+        }, 500
+
     started_at = now_msk()
     try:
-        if trigger == "manual":
-            save_manual_parser_started_at(started_at)
+        save_update_started_at(started_at, trigger)
         save_update_running_status(trigger, started_at)
     except OSError as error:
         release_parser_lock(lock_fd)
@@ -717,12 +725,13 @@ def parse_msk_datetime(value):
     return parsed.astimezone(MSK_TZ)
 
 
-def get_manual_parser_cooldown_response():
-    last_started_at = load_manual_parser_started_at()
+def get_manual_update_cooldown_response():
+    last_started = load_update_last_started()
+    last_started_at = last_started.get("started_at") if last_started else None
     if not last_started_at:
         return None
 
-    next_allowed_at = last_started_at + timedelta(seconds=PARSER_MANUAL_COOLDOWN_SECONDS)
+    next_allowed_at = last_started_at + timedelta(seconds=UPDATE_MANUAL_COOLDOWN_SECONDS)
     current_time = now_msk()
     if current_time >= next_allowed_at:
         return None
@@ -730,19 +739,20 @@ def get_manual_parser_cooldown_response():
     retry_after_seconds = max(1, int((next_allowed_at - current_time).total_seconds()))
     return {
         "status": "rate_limited",
-        "message": "Manual parser can be started only once every 60 minutes",
+        "message": "Manual update can be started only once every 60 minutes after any update start",
         "trigger": "manual",
         "last_started_at": last_started_at.isoformat(timespec="seconds"),
+        "last_trigger": last_started.get("trigger"),
         "next_allowed_at": next_allowed_at.isoformat(timespec="seconds"),
         "retry_after_seconds": retry_after_seconds,
     }
 
 
-def load_manual_parser_started_at():
+def load_update_last_started():
     try:
-        data = json.loads(PARSER_MANUAL_THROTTLE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(UPDATE_LAST_START_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+        data = load_legacy_manual_parser_started_data()
 
     raw_started_at = data.get("last_started_at")
     if not raw_started_at:
@@ -754,17 +764,31 @@ def load_manual_parser_started_at():
         return None
 
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=MSK_TZ)
-    return parsed.astimezone(MSK_TZ)
+        parsed = parsed.replace(tzinfo=MSK_TZ)
+    else:
+        parsed = parsed.astimezone(MSK_TZ)
+
+    return {
+        "started_at": parsed,
+        "trigger": data.get("last_trigger") or data.get("trigger") or "unknown",
+    }
 
 
-def save_manual_parser_started_at(started_at):
-    PARSER_MANUAL_THROTTLE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def load_legacy_manual_parser_started_data():
+    try:
+        return json.loads(LEGACY_PARSER_MANUAL_THROTTLE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_update_started_at(started_at, trigger):
+    UPDATE_LAST_START_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "last_started_at": started_at.isoformat(timespec="seconds"),
-        "cooldown_seconds": PARSER_MANUAL_COOLDOWN_SECONDS,
+        "last_trigger": trigger,
+        "manual_cooldown_seconds": UPDATE_MANUAL_COOLDOWN_SECONDS,
     }
-    PARSER_MANUAL_THROTTLE_PATH.write_text(
+    UPDATE_LAST_START_PATH.write_text(
         json.dumps(data, ensure_ascii=False),
         encoding="utf-8",
     )
