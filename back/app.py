@@ -69,7 +69,7 @@ def run_update():
 def update_status():
     status = get_update_status()
     return jsonify({
-        "ok": status.get("state") not in {"failed", "timed_out"},
+        "ok": status.get("state") != "failed",
         "update": status,
     })
 
@@ -127,7 +127,7 @@ def get_parser_update_settings():
         "timezone": "Europe/Moscow",
         "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
         "period_hours": PARSER_PERIOD_HOURS,
-        "timeout_minutes": PARSER_TIMEOUT_SECONDS // 60,
+        "stale_lock_after_minutes": PARSER_TIMEOUT_SECONDS // 60,
         "next_run_at": get_next_parser_run_at(current_time).isoformat(timespec="seconds"),
     }
 
@@ -147,7 +147,7 @@ def get_model_update_settings():
         "message": "Model stage runs only as part of /update",
         "status_url": None,
         "signals_url": "/signals",
-        "timeout_minutes": MODEL_TIMEOUT_SECONDS // 60,
+        "stale_lock_after_minutes": MODEL_TIMEOUT_SECONDS // 60,
         "shared_lock": {
             "path": str(PARSER_LOCK_PATH),
             "message": "Parser and model cannot run at the same time",
@@ -162,7 +162,7 @@ def get_update_settings():
         "timezone": "Europe/Moscow",
         "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
         "period_hours": PARSER_PERIOD_HOURS,
-        "timeout_minutes": UPDATE_TIMEOUT_SECONDS // 60,
+        "stale_lock_after_minutes": UPDATE_TIMEOUT_SECONDS // 60,
         "stages": ["parser", "model"],
         "model_max_requests_per_run": "all",
         "next_run_at": get_next_parser_run_at(current_time).isoformat(timespec="seconds"),
@@ -178,7 +178,7 @@ def get_update_overview():
         "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
         "period_hours": PARSER_PERIOD_HOURS,
         "next_run_at": get_next_parser_run_at().isoformat(timespec="seconds"),
-        "timeout_minutes": UPDATE_TIMEOUT_SECONDS // 60,
+        "stale_lock_after_minutes": UPDATE_TIMEOUT_SECONDS // 60,
         "stages": [
             {
                 "name": "parser",
@@ -347,7 +347,7 @@ def run_update_job_with_lock(trigger, started_at):
         "started_at": started_at.isoformat(timespec="seconds"),
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
-        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
         "summary": {
             "parser": parser_summary,
             "model": model_summary,
@@ -373,21 +373,33 @@ def get_update_status():
         return {
             "state": "idle",
             "message": "Update has not been started yet",
-            "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+            "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
         }
 
-    if status.get("state") == "running":
+    if is_unfinished_running_status(status):
+        status["state"] = "running"
         started_at = parse_msk_datetime(status.get("started_at"))
         if started_at:
             duration_seconds = max(0, int((now_msk() - started_at).total_seconds()))
             status["duration_seconds"] = duration_seconds
-            if duration_seconds > UPDATE_TIMEOUT_SECONDS:
-                status["state"] = "timed_out"
-                status["message"] = "Update exceeded the 1 hour timeout"
-                status["timeout_seconds"] = UPDATE_TIMEOUT_SECONDS
-                save_update_status(status)
+            status["message"] = "Update is running"
+            status["stale_lock_after_seconds"] = UPDATE_TIMEOUT_SECONDS
+            save_update_status(status)
 
     return status
+
+
+def is_unfinished_running_status(status):
+    if status.get("state") == "running":
+        return True
+    if status.get("state") != "timed_out" or status.get("finished_at"):
+        return False
+
+    stages = status.get("stages") or {}
+    return any(
+        isinstance(stage_status, dict) and stage_status.get("state") == "running"
+        for stage_status in stages.values()
+    )
 
 
 def load_update_status():
@@ -405,7 +417,7 @@ def save_update_running_status(trigger, started_at):
         "started_at": started_at.isoformat(timespec="seconds"),
         "finished_at": None,
         "duration_seconds": 0,
-        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
         "summary": {},
         "stages": {
             "parser": {"state": "pending", "message": "Parser has not started yet"},
@@ -452,7 +464,7 @@ def save_update_stage_status(
         "started_at": update_started_at.isoformat(timespec="seconds"),
         "finished_at": None,
         "duration_seconds": max(0, int((now_msk() - update_started_at).total_seconds())),
-        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
         "stages": stages,
     })
     save_update_status(status)
@@ -468,7 +480,7 @@ def save_update_failed_status(trigger, started_at, finished_at, error):
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
         "error": str(error),
-        "timeout_seconds": UPDATE_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
     })
     save_update_status(status)
 
@@ -518,7 +530,7 @@ def get_model_status():
         return {
             "state": "idle",
             "message": "Model processing has not been started yet",
-            "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+            "stale_lock_after_seconds": MODEL_TIMEOUT_SECONDS,
         }
 
     if status.get("state") == "running":
@@ -526,11 +538,8 @@ def get_model_status():
         if started_at:
             duration_seconds = max(0, int((now_msk() - started_at).total_seconds()))
             status["duration_seconds"] = duration_seconds
-            if duration_seconds > MODEL_TIMEOUT_SECONDS:
-                status["state"] = "timed_out"
-                status["message"] = "Model processing exceeded the 1 hour timeout"
-                status["timeout_seconds"] = MODEL_TIMEOUT_SECONDS
-                save_model_status(status)
+            status["message"] = "Model processing is running"
+            status["stale_lock_after_seconds"] = MODEL_TIMEOUT_SECONDS
 
     return status
 
@@ -552,7 +561,7 @@ def save_model_running_status(started_at, limit):
         "model": MODEL_OPENROUTER_MODEL,
         "started_at": started_at.isoformat(timespec="seconds"),
         "finished_at": None,
-        "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": MODEL_TIMEOUT_SECONDS,
     })
 
 
@@ -581,7 +590,7 @@ def save_model_finished_status(started_at, finished_at, result, limit):
         "rate_limited": rate_limited,
         "openrouter_run_cost": openrouter_usage.get("run_cost"),
         "openrouter": openrouter_usage,
-        "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": MODEL_TIMEOUT_SECONDS,
     })
 
 
@@ -597,7 +606,7 @@ def save_model_failed_status(started_at, finished_at, error, limit):
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
         "error": str(error),
-        "timeout_seconds": MODEL_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": MODEL_TIMEOUT_SECONDS,
     })
 
 
@@ -629,7 +638,7 @@ def get_parser_status():
         return {
             "state": "idle",
             "message": "Parser has not been started yet",
-            "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+            "stale_lock_after_seconds": PARSER_TIMEOUT_SECONDS,
         }
 
     if status.get("state") == "running":
@@ -637,11 +646,8 @@ def get_parser_status():
         if started_at:
             duration_seconds = max(0, int((now_msk() - started_at).total_seconds()))
             status["duration_seconds"] = duration_seconds
-            if duration_seconds > PARSER_TIMEOUT_SECONDS:
-                status["state"] = "timed_out"
-                status["message"] = "Parser exceeded the 1 hour timeout"
-                status["timeout_seconds"] = PARSER_TIMEOUT_SECONDS
-                save_parser_status(status)
+            status["message"] = "Parser is running"
+            status["stale_lock_after_seconds"] = PARSER_TIMEOUT_SECONDS
 
     return status
 
@@ -660,7 +666,7 @@ def save_parser_running_status(trigger, started_at):
         "trigger": trigger,
         "started_at": started_at.isoformat(timespec="seconds"),
         "finished_at": None,
-        "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": PARSER_TIMEOUT_SECONDS,
     })
 
 
@@ -674,7 +680,7 @@ def save_parser_finished_status(trigger, started_at, finished_at, result):
         "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
         "created": result.get("created"),
         "errors": result.get("errors"),
-        "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": PARSER_TIMEOUT_SECONDS,
     })
 
 
@@ -687,7 +693,7 @@ def save_parser_failed_status(trigger, started_at, finished_at, error):
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
         "error": str(error),
-        "timeout_seconds": PARSER_TIMEOUT_SECONDS,
+        "stale_lock_after_seconds": PARSER_TIMEOUT_SECONDS,
     })
 
 
