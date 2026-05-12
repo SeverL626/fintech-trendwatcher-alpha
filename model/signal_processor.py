@@ -1,12 +1,8 @@
 import json
 import os
-from pydoc import text
 import re
 import time
-from turtle import title
 
-from matplotlib.pyplot import title
-from matplotlib import text
 import requests
 
 try:
