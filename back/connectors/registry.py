@@ -8,6 +8,7 @@ from .moex import MoexConnector
 from .nalog import NalogConnector
 from .koreaherald import KoreaheraldConnector
 from .fedsfm import FedsfmConnector
+from .deloitte import DeloitteInsightsConnector
 from .rbc import RbcConnector
 from .rosstat import RosstatConnector
 from .sber import SberConnector
@@ -36,6 +37,7 @@ CONNECTORS = {
     "nalog": NalogConnector,
     "koreaherald": KoreaheraldConnector,
     "fedsfm": FedsfmConnector,
+    "deloitte_insights": DeloitteInsightsConnector,
 }
 
 

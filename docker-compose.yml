@@ -7,12 +7,43 @@ services:
     environment:
       DB_PATH: /app/data/app.db
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_TIMEOUT_SECONDS: ${OPENROUTER_TIMEOUT_SECONDS:-60}
-      OPENROUTER_MAX_RETRIES: ${OPENROUTER_MAX_RETRIES:-3}
-      OPENROUTER_RETRY_SECONDS: ${OPENROUTER_RETRY_SECONDS:-20}
-      OPENROUTER_REQUEST_DELAY_SECONDS: ${OPENROUTER_REQUEST_DELAY_SECONDS:-0}
+      UPDATE_PARSER_ONLY: ${UPDATE_PARSER_ONLY:-0}
+      PARSER_ONLY_SOURCE_IDS: ${PARSER_ONLY_SOURCE_IDS:-}
     volumes:
       - type: bind
         source: ./data
         target: /app/data
+    restart: unless-stopped
+
+  frontend-backend:
+    build:
+      context: ./front/my-app/backend
+      dockerfile: Dockerfile
+    container_name: alfa-hackiton-frontend-backend
+    ports:
+      - "${FRONT_BACKEND_PORT:-5001}:5001"
+    environment:
+      MAIN_DB_PATH: /app/data/app.db
+      FRONT_BACKEND_DB_PATH: /app/data/redcat.db
+      UPDATE_API_URL: http://backend:5000/update
+      UPDATE_STATUS_URL: http://backend:5000/update/status
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-redcat-secret-key-change-me-32-bytes}
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./front/my-app
+      dockerfile: Dockerfile
+    container_name: alfa-hackiton-frontend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      - backend
+      - frontend-backend
     restart: unless-stopped

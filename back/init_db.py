@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -21,6 +22,20 @@ PARSE_WINDOW_HOURS = 24
 RAW_NEWS_RETENTION_DAYS = 7
 MAX_FUTURE_HOURS = 2
 MIN_TEXT_LENGTH = 80
+SIGNAL_CATEGORIES = (
+    "Регулирование и комплаенс",
+    "Платежи и инфраструктура",
+    "Антифрод и кибербезопасность",
+    "Банковские продукты и клиентский опыт",
+    "Конкуренты и банковский рынок",
+    "Финтех и новые технологии",
+    "Идентификация и биометрия",
+    "Санкции и ограничения",
+    "Макроэкономика и ставки",
+    "Рынки и инвестиции",
+    "Финансовые результаты и отчетность",
+    "Статистика и данные",
+)
 INITIAL_SOURCES = [
     {
         "id": 2,
@@ -651,6 +666,30 @@ INITIAL_SOURCES = [
             "user_agent": DEFAULT_USER_AGENT,
         },
     },
+    {
+        "id": 39,
+        "name": "Deloitte Insights",
+        "url": "https://www.deloitte.com/us/en/insights.html",
+        "source_type": "site",
+        "is_active": 1,
+        "parse_frequency_minutes": 60,
+        "parser_config": {
+            "connector": "deloitte_insights",
+            "max_age_days": 31,
+            "max_age_hours": 744,
+            "link_selector": "a[href*='/us/en/insights/']",
+            "url_contains": ["/us/en/insights/"],
+            "text_selector": "article p, main p, [data-component-name] p, p",
+            "require_date": True,
+            "strict_dates": True,
+            "max_links": 100,
+            "search_page_size": 100,
+            "search_max_pages": 3,
+            "timeout": 20,
+            "allow_javascript_placeholder": True,
+            "user_agent": DEFAULT_USER_AGENT,
+        },
+    },
 ]
 
 
@@ -719,23 +758,25 @@ CREATE INDEX IF NOT EXISTS idx_moex_daily_stats_trade_date ON moex_daily_stats(t
 """
 
 
-SIGNALS_SCHEMA_SQL = """
+def build_signals_schema_sql() -> str:
+    category_values = ",\n        ".join(f"'{category}'" for category in SIGNAL_CATEGORIES)
+    return f"""
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     headline TEXT NOT NULL,
     hotness INTEGER NOT NULL CHECK(hotness BETWEEN 1 AND 5),
     why_now TEXT,
     category TEXT NOT NULL CHECK(category IN (
-        'Инвестиции и рынки',
-        'Корпоративные финансы и сделки',
-        'Финансовые результаты',
-        'Макроэкономика и статистика'
+        {category_values}
     )),
     sources TEXT NOT NULL DEFAULT '[]',
     summary TEXT,
     draft TEXT
 );
 """
+
+
+SIGNALS_SCHEMA_SQL = build_signals_schema_sql()
 
 
 def get_db_path(db_path: str | Path | None = None) -> Path:
@@ -764,6 +805,8 @@ def init_db(db_path: str | Path | None = None, seed_initial_source: bool = True)
         ensure_signals_schema(connection)
         remove_retired_sources(connection)
         cleanup_bad_raw_news(connection)
+        cleanup_orphan_signals(connection)
+        cleanup_duplicate_signal_sources(connection)
         if seed_initial_source:
             seed_sources(connection)
         connection.commit()
@@ -826,6 +869,7 @@ def ensure_signals_schema(connection: sqlite3.Connection) -> None:
     has_expected_constraints = (
         "CHECK(hotness BETWEEN 1 AND 5)" in schema_sql
         and "sources TEXT NOT NULL DEFAULT '[]'" in schema_sql
+        and schema_has_current_signal_categories(schema_sql)
     )
     if columns == desired_columns and has_expected_constraints:
         return
@@ -833,6 +877,43 @@ def ensure_signals_schema(connection: sqlite3.Connection) -> None:
     backup_name = f"signals_legacy_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     connection.execute(f"ALTER TABLE signals RENAME TO {backup_name}")
     connection.execute(SIGNALS_SCHEMA_SQL)
+    if all(column in columns for column in desired_columns):
+        migrate_legacy_signals(connection, backup_name)
+
+
+def schema_has_current_signal_categories(schema_sql: str) -> bool:
+    return all(f"'{category}'" in schema_sql for category in SIGNAL_CATEGORIES)
+
+
+def migrate_legacy_signals(connection: sqlite3.Connection, backup_name: str) -> None:
+    connection.execute(f"""
+        INSERT INTO signals (
+            id,
+            headline,
+            hotness,
+            why_now,
+            category,
+            sources,
+            summary,
+            draft
+        )
+        SELECT
+            id,
+            headline,
+            hotness,
+            why_now,
+            CASE category
+                WHEN 'Инвестиции и рынки' THEN 'Рынки и инвестиции'
+                WHEN 'Корпоративные финансы и сделки' THEN 'Рынки и инвестиции'
+                WHEN 'Финансовые результаты' THEN 'Финансовые результаты и отчетность'
+                WHEN 'Макроэкономика и статистика' THEN 'Макроэкономика и ставки'
+                ELSE 'Регулирование и комплаенс'
+            END,
+            sources,
+            summary,
+            draft
+        FROM {backup_name}
+    """)
 
 
 def remove_retired_sources(connection: sqlite3.Connection) -> None:
@@ -840,6 +921,7 @@ def remove_retired_sources(connection: sqlite3.Connection) -> None:
         DELETE FROM sources
         WHERE url = 'https://searchapi.api.cloud.yandex.net/v2/web/searchAsync'
            OR url LIKE 'https://www.finextra.com/rss/%'
+           OR url = 'https://www.finextra.com/research'
            OR url = 'https://www.cbr.ru/rss/eventrss'
            OR parser_config LIKE '%yandex_search%'
     """)
@@ -887,6 +969,98 @@ def cleanup_bad_raw_news(connection: sqlite3.Connection) -> None:
         WHERE source_id = 11
           AND raw_data LIKE '%/archive/news%'
     """)
+
+
+def cleanup_orphan_signals(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(signals)")
+    }
+    if "sources" not in columns:
+        return
+
+    existing_raw_news_ids = {
+        row["id"]
+        for row in connection.execute("SELECT id FROM raw_news")
+    }
+    rows = connection.execute("SELECT id, sources FROM signals").fetchall()
+    for row in rows:
+        source_ids = parse_signal_source_ids(row["sources"])
+        kept_ids = [source_id for source_id in source_ids if source_id in existing_raw_news_ids]
+        if not kept_ids:
+            connection.execute("DELETE FROM signals WHERE id = ?", (row["id"],))
+        elif kept_ids != source_ids:
+            connection.execute(
+                "UPDATE signals SET sources = ? WHERE id = ?",
+                (serialize_signal_source_ids(kept_ids), row["id"]),
+            )
+
+
+def cleanup_duplicate_signal_sources(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("SELECT id, sources, draft FROM signals").fetchall()
+    signals_by_single_source = {}
+    for row in rows:
+        source_ids = parse_signal_source_ids(row["sources"])
+        if len(source_ids) != 1:
+            continue
+        signals_by_single_source.setdefault(source_ids[0], []).append(row)
+
+    for duplicate_rows in signals_by_single_source.values():
+        if len(duplicate_rows) < 2:
+            continue
+        keeper = sorted(
+            duplicate_rows,
+            key=lambda row: (
+                is_duplicate_signal_draft(row["draft"]),
+                row["id"],
+            ),
+        )[0]
+        for row in duplicate_rows:
+            if row["id"] != keeper["id"]:
+                connection.execute("DELETE FROM signals WHERE id = ?", (row["id"],))
+
+
+def is_duplicate_signal_draft(value) -> bool:
+    return str(value or "").startswith("DUBLICATE OF ")
+
+
+def parse_signal_source_ids(value) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, int):
+        return [value]
+
+    text = str(value).strip()
+    if not text:
+        return []
+    if re.fullmatch(r"\d+", text):
+        return [int(text)]
+    if "," in text and not text.startswith("["):
+        return [int(part) for part in re.findall(r"\d+", text)]
+
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return [int(part) for part in re.findall(r"\d+", text)]
+
+    if isinstance(parsed, int):
+        return [parsed]
+    if isinstance(parsed, list):
+        result = []
+        for item in parsed:
+            try:
+                result.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return result
+    return []
+
+
+def serialize_signal_source_ids(source_ids: list[int]) -> str:
+    source_ids = sorted(set(source_ids))
+    if len(source_ids) == 1:
+        return str(source_ids[0])
+    return ",".join(str(source_id) for source_id in source_ids)
 
 
 def seed_sources(connection: sqlite3.Connection) -> None:

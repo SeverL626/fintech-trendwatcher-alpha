@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 
 try:
@@ -42,18 +43,32 @@ DEFAULT_PARSER_CONFIG = {
     "verify_ssl": True,
 }
 
+PARSER_ONLY_SOURCE_IDS = tuple(
+    int(value)
+    for value in re.findall(r"\d+", os.getenv("PARSER_ONLY_SOURCE_IDS", ""))
+)
+
 
 def run_parser_from_db(db_path=DB_PATH):
-    init_db(db_path, seed_initial_source=False)
+    init_db(db_path, seed_initial_source=True)
     results = []
 
     with connect_db(db_path) as db:
-        sources = db.execute("""
+        query = """
             SELECT id, name, url, source_type, parser_config
             FROM sources
             WHERE is_active = 1
             ORDER BY id ASC
-        """).fetchall()
+        """
+        params = ()
+        if PARSER_ONLY_SOURCE_IDS:
+            placeholders = ",".join("?" for _ in PARSER_ONLY_SOURCE_IDS)
+            query = query.replace(
+                "WHERE is_active = 1",
+                f"WHERE is_active = 1 AND id IN ({placeholders})",
+            )
+            params = PARSER_ONLY_SOURCE_IDS
+        sources = db.execute(query, params).fetchall()
 
         for source in sources:
             try:
@@ -384,7 +399,9 @@ def insert_raw_news(db, source_id, item):
         json.dumps(item.get("raw_data") or item, ensure_ascii=False),
         "new",
     ))
-    return existing is None
+    if existing is not None:
+        return None
+    return cursor.lastrowid
 
 
 def insert_moex_daily_stat(db, source_id, stat):

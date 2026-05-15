@@ -56,6 +56,8 @@ class BaseConnector:
         }
         if config.get("referer"):
             headers["Referer"] = config["referer"]
+        if config.get("allow_javascript_placeholder"):
+            headers["X-Allow-JS-Placeholder"] = "1"
         headers.update(config.get("headers") or {})
         return headers
 
@@ -173,11 +175,12 @@ class BaseConnector:
             "if you are not a bot",
             "request rejected",
             "access denied",
-            "please enable javascript",
             "dosl7.challenge",
             "window[\"bobcmn\"]",
             "/tspd/",
         )
+        if not response.request.headers.get("X-Allow-JS-Placeholder"):
+            waf_markers = (*waf_markers, "please enable javascript")
         if any(marker in sample for marker in waf_markers):
             raise BlockedRequestError(
                 f"{url} blocked automated requests"
