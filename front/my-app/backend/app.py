@@ -490,6 +490,7 @@ def get_main_overview():
         "sources": 0,
         "categories": 0,
         "important": 0,
+        "processed_last_24h": 0,
         "last_parsed_at": None,
         "last_update_at": None,
         "category_options": [],
@@ -529,6 +530,14 @@ def get_main_overview():
         """).fetchone()
         if source_row:
             overview["sources"] = source_row["sources"] or 0
+
+        processed_row = connection.execute("""
+            SELECT COUNT(*) AS processed_last_24h
+            FROM raw_news
+            WHERE status = 'processed'
+              AND datetime(parsed_at) >= datetime('now', '-1 day')
+        """).fetchone()
+        overview["processed_last_24h"] = processed_row["processed_last_24h"] if processed_row else 0
 
         source_rows = connection.execute("""
             SELECT DISTINCT s.name AS name
@@ -845,7 +854,7 @@ def create_app(test_config=None):
         return jsonify({"ok": True})
 
     @app.post("/api/update")
-    @admin_only
+    @jwt_required()
     def run_update():
         return proxy_backend_update()
 

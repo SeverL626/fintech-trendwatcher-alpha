@@ -200,6 +200,14 @@ button { cursor: pointer; }
 .button:hover { transform: translateY(-1px); }
 .button.primary { background: var(--red); color: white; }
 .button.ghost { background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.1); color: white; }
+.button.icon-button {
+  width: 46px;
+  min-width: 46px;
+  padding-inline: 0;
+  justify-content: center;
+  font-size: 1.08rem;
+  line-height: 1;
+}
 .full { width: 100%; }
 
 .hero-panel { align-self: start; }
@@ -408,6 +416,7 @@ textarea { resize: vertical; }
 .signal-card.variant-large { grid-column: 1 / -1; min-height: 210px; }
 .signal-card.variant-medium { min-height: 180px; }
 .signal-card.variant-small { min-height: 160px; }
+.signal-card.is-offtop { align-content: start; }
 
 .signal-top {
   display: flex;

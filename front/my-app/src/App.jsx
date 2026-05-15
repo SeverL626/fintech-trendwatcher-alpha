@@ -194,9 +194,21 @@ function updateMessage(data) {
 
 function updateErrorMessage(error) {
   const message = String(error?.message || '').toLowerCase()
+  if (message.includes('missing authorization') || message.includes('unauthorized')) {
+    return 'Только для авторизованных пользователей'
+  }
   if (message.includes('already running')) return 'Поиск уже идёт'
   if (message.includes('once every') || message.includes('recent')) return 'Поиск был произведён недавно'
   return error.message
+}
+
+async function copySignalLink(signalId) {
+  const url = routeUrl(`/signals/${signalId}`)
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(url)
+    return
+  }
+  window.prompt('Ссылка на новость', url)
 }
 
 function Market({ market }) {
@@ -376,6 +388,11 @@ export default function App() {
   }
 
   const runUpdate = async () => {
+    if (!auth?.token) {
+      flash('Только для авторизованных пользователей')
+      return
+    }
+
     setUpdating(true)
     try {
       const data = await apiFetch('/api/update', {
@@ -673,7 +690,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
     observations: overview.observations ?? signals.length,
     topics: overview.categories ?? new Set(signals.map((item) => item.category).filter(Boolean)).size,
     sources: overview.sources ?? new Set(signals.map((item) => item.source_name).filter(Boolean)).size,
-    important: overview.important ?? signals.filter((item) => Number(item.hotness) >= 4).length,
+    processedLastDay: overview.processed_last_24h ?? 0,
     lastParsed: compactDate(overview.last_parsed_at),
     lastUpdate: compactDate(overview.last_update_at),
   }
@@ -683,19 +700,14 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
       <section className="hero card">
         <div>
           <span className="eyebrow">Трендвотчер по финтех-публикациям</span>
-          <h1>Готовые сигналы из базы, без лишнего шума</h1>
-          <p>
-            Все цифры считаются по базе карточек. На главной показываются только последние новости
-            по hotness 5, 4 и 3.
-          </p>
+          <h1>Опережай тренды. Управляй будущим.</h1>
+          <p>Учебный проект в рамках хакатона АльфаБанка для Лицея НИУ ВШЭ</p>
           <div className="hero-actions">
             <Link to="/cards" className="button primary">Открыть FinTech News</Link>
             <Link to="/search" className="button ghost">Открыть поиск</Link>
-            {auth ? (
-              <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
-                {updating ? 'Запускаю...' : 'Обновить базу'}
-              </button>
-            ) : null}
+            <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
+              {updating ? 'Запускаю...' : 'Обновить базу'}
+            </button>
           </div>
         </div>
 
@@ -704,7 +716,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
             <Kpi label="Наблюдений" value={counts.observations} />
             <Kpi label="Источников" value={counts.sources} />
             <Kpi label="Категорий" value={counts.topics} />
-            <Kpi label="Важное" value={counts.important} />
+            <Kpi label="За сутки" value={counts.processedLastDay} />
             <Kpi label="Последний парсинг" value={counts.lastParsed} />
             <Kpi label="Обновление базы" value={counts.lastUpdate} />
           </div>
@@ -715,7 +727,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
         <div className="section-head">
           <div>
             <span className="eyebrow">Последние новости</span>
-            <h2>Показываем только свежие карточки</h2>
+            <h2>Пирамида hotness</h2>
           </div>
           <Link to="/cards" className="button ghost">Все FinTech News</Link>
         </div>
@@ -813,9 +825,9 @@ function SearchPage({ signals, favorites = [], auth, onToggleFavorite }) {
   return (
     <div className="stack">
       <section className="card search-window">
-        <span className="eyebrow">Поиск карточек</span>
-        <h1>Отдельное окно поиска</h1>
-        <p>Поиск вынесен отдельно и не мешает вкладке FinTech News.</p>
+        <span className="eyebrow">Поиск</span>
+        <h1>Поиск</h1>
+        <p>Ищет идеальные совпадения</p>
         <input
           className="search-input"
           placeholder="Ищи по теме, источнику, заголовку..."
@@ -856,11 +868,11 @@ function SearchPage({ signals, favorites = [], auth, onToggleFavorite }) {
 }
 
 function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavorite }) {
-  const [sortBy, setSortBy] = useState('time_desc')
+  const [sortBy, setSortBy] = useState('hotness')
   const [category, setCategory] = useState([])
   const [source, setSource] = useState([])
   const [hotness, setHotness] = useState([])
-  const [timeRange, setTimeRange] = useState('all')
+  const [timeRange, setTimeRange] = useState('week')
   const [pageSignals, setPageSignals] = useState([])
   const [hasMore, setHasMore] = useState(false)
   const [cardsLoading, setCardsLoading] = useState(false)
@@ -1106,6 +1118,7 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
               auth={auth}
               onToggleFavorite={onToggleFavorite}
               favorite={favorites.some((fav) => fav.id === item.id)}
+              offtop
             />
           ))}
         </section>
@@ -1173,6 +1186,7 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
   const sourceUrls = Array.isArray(item.source_urls) && item.source_urls.length
     ? item.source_urls.slice(0, 3)
     : [item.url];
+  const favorite = favorites.some((fav) => fav.id === item.id)
 
   return (
     <section className="card detail-card">
@@ -1188,15 +1202,18 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
           <button className="button ghost" onClick={() => window.open(routeUrl(`/signals/${item.id}`), '_blank', 'noopener,noreferrer')}>
             Открыть в новой вкладке
           </button>
-          <button className="button primary" onClick={() => onToggleFavorite(item.id)}>
-            {favorites.some((fav) => fav.id === item.id) ? 'Убрать из избранного' : 'В избранное'}
+          <button className="button icon-button ghost" title="Скопировать ссылку" onClick={() => copySignalLink(item.id)}>
+            ↗
+          </button>
+          <button className="button icon-button primary" onClick={() => onToggleFavorite(item.id)}>
+            {favorite ? '★' : '☆'}
           </button>
         </div>
       </div>
 
       <div className="detail-grid">
-        <InfoCard title="Summary" text={item.summary} />
-        <InfoCard title="Why now" text={item.why_now} />
+        <InfoCard title="Кратко" text={item.summary} />
+        <InfoCard title="Актуальность" text={item.why_now} />
         <InfoCard title="Draft" text={item.draft} />
         <InfoCard title="Hotness" text={String(item.hotness)} />
 
@@ -1230,7 +1247,7 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
   )
 }
 
-function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 'default' }) {
+function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 'default', offtop = false }) {
   const published = item.published_at || item.created_at
 
   const openInNewTab = () => {
@@ -1238,33 +1255,36 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
   }
 
   return (
-    <article className={`signal-card variant-${variant}`}>
+    <article className={`signal-card variant-${variant} ${offtop ? 'is-offtop' : ''}`}>
       <div className="signal-top">
         <div className="signal-headline">
-          <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span>
+          {!offtop ? <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span> : null}
           <h3>{item.headline}</h3>
         </div>
-        <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span>
+        {!offtop ? <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span> : null}
       </div>
 
-      <div className="signal-meta">
+      {!offtop ? <div className="signal-meta">
         <span>{formatDate(published)}</span>
         <span>{item.source_name}</span>
-      </div>
+      </div> : null}
 
-      <p><b>Summary:</b> {item.summary}</p>
-      <p><b>Why now:</b> {item.why_now}</p>
+      {!offtop && item.summary ? <p>{item.summary}</p> : null}
+      {!offtop && item.why_now ? <p><b>Актуальность:</b> {item.why_now}</p> : null}
 
-      <div className="meta-row">
+      {!offtop ? <div className="meta-row">
         {(item.sources || []).map((source) => (
           <span key={source} className="mini-pill">{source}</span>
         ))}
-      </div>
+      </div> : null}
 
       <div className="signal-actions">
         <button className="button ghost" onClick={openInNewTab}>Открыть</button>
-        <button className="button primary" onClick={() => onToggleFavorite?.(item.id)}>
-          {favorite ? 'Сохранено' : 'В избранное'}
+        <button className="button icon-button ghost" title="Скопировать ссылку" onClick={() => copySignalLink(item.id)}>
+          ↗
+        </button>
+        <button className="button icon-button primary" title={favorite ? 'Убрать из избранного' : 'В избранное'} onClick={() => onToggleFavorite?.(item.id)}>
+          {favorite ? '★' : '☆'}
         </button>
       </div>
     </article>
