@@ -110,7 +110,7 @@ def signals():
 
 @app.route("/api/signals")
 def api_signals():
-    limit = normalize_api_limit(request.args.get("limit"), default=100, maximum=500)
+    limit = normalize_api_limit(request.args.get("limit"), default=100, maximum=10000)
     return jsonify({
         "ok": True,
         "items": list_frontend_signals(app.config["DB_PATH"], limit),
@@ -119,7 +119,7 @@ def api_signals():
 
 @app.route("/api/market")
 def api_market():
-    limit = normalize_api_limit(request.args.get("limit"), default=30, maximum=200)
+    limit = normalize_api_limit(request.args.get("limit"), default=50, maximum=10000)
     return jsonify({
         "ok": True,
         "items": list_frontend_market(app.config["DB_PATH"], limit),
@@ -388,7 +388,7 @@ def format_market_number(value):
         return value
 
 
-def normalize_api_limit(value, default=100, maximum=500):
+def normalize_api_limit(value, default=100, maximum=10000):
     try:
         limit = int(value)
     except (TypeError, ValueError):

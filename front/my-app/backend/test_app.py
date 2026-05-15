@@ -89,7 +89,7 @@ def auth_headers(client):
 @pytest.fixture
 def admin_headers(client):
     """Фикстура для получения токена администратора."""
-    login_data = {"email": "admin@redcat.local", "password": "Admin12345!"}
+    login_data = {"email": "manager@redcat.tu", "password": "rqbqerj1543tgjkq"}
     res = client.post('/api/login', json=login_data)
     token = res.json['token']
     return {"Authorization": f"Bearer {token}"}

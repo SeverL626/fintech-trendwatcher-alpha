@@ -226,6 +226,7 @@ button { cursor: pointer; }
 
 .kpi { background: rgba(255,255,255,0.03); }
 .kpi-value { font-size: 2rem; font-weight: 800; color: var(--yellow); }
+.kpi-value.text-value { font-size: 1.18rem; line-height: 1.2; }
 .kpi-label { color: var(--muted); }
 
 .section-head {
@@ -247,12 +248,17 @@ button { cursor: pointer; }
   border: 1px solid transparent;
 }
 .hot-badge {
-  background: rgba(219, 1, 28, 0.15);
+  background: rgba(255,255,255,0.08);
   color: #fff;
-  border: 1px solid rgba(219, 1, 28, 0.22);
+  border: 1px solid rgba(255,255,255,0.14);
   flex: 0 0 auto;
   white-space: nowrap;
 }
+.hot-badge.hotness-1 { background: rgba(120, 130, 150, 0.18); border-color: rgba(120, 130, 150, 0.36); color: rgba(246,247,251,.78); }
+.hot-badge.hotness-2 { background: rgba(84, 151, 255, 0.15); border-color: rgba(84,151,255,.3); }
+.hot-badge.hotness-3 { background: rgba(255, 210, 26, 0.14); border-color: rgba(255,210,26,.35); }
+.hot-badge.hotness-4 { background: rgba(255, 120, 64, 0.17); border-color: rgba(255,120,64,.36); }
+.hot-badge.hotness-5 { background: rgba(219, 1, 28, 0.24); border-color: rgba(219,1,28,.48); }
 
 input, select, textarea {
   width: 100%;
@@ -517,8 +523,15 @@ textarea { resize: vertical; }
 }
 .pill.category-banking, .mini-pill.category-banking { background: rgba(219, 1, 28, 0.16); border-color: rgba(219,1,28,.25); }
 .pill.category-payments, .mini-pill.category-payments { background: rgba(255, 210, 26, 0.12); border-color: rgba(255,210,26,.25); color: #fff; }
-.pill.category-ux, .mini-pill.category-ux { background: rgba(125, 92, 255, 0.16); border-color: rgba(125,92,255,.25); }
-.pill.category-partnership, .mini-pill.category-partnership { background: rgba(0, 190, 160, 0.16); border-color: rgba(0,190,160,.25); }
+.pill.category-antifraud, .mini-pill.category-antifraud { background: rgba(255, 70, 70, 0.18); border-color: rgba(255,70,70,.32); }
+.pill.category-products, .mini-pill.category-products { background: rgba(125, 92, 255, 0.16); border-color: rgba(125,92,255,.25); }
+.pill.category-competitors, .mini-pill.category-competitors { background: rgba(0, 190, 160, 0.16); border-color: rgba(0,190,160,.25); }
+.pill.category-tech, .mini-pill.category-tech { background: rgba(0, 170, 255, 0.16); border-color: rgba(0,170,255,.28); }
+.pill.category-identity, .mini-pill.category-identity { background: rgba(180, 110, 255, 0.17); border-color: rgba(180,110,255,.3); }
+.pill.category-sanctions, .mini-pill.category-sanctions { background: rgba(220, 80, 110, 0.18); border-color: rgba(220,80,110,.34); }
+.pill.category-macro, .mini-pill.category-macro { background: rgba(255, 170, 52, 0.16); border-color: rgba(255,170,52,.3); }
+.pill.category-reporting, .mini-pill.category-reporting { background: rgba(150, 150, 170, 0.16); border-color: rgba(150,150,170,.28); }
+.pill.category-stats, .mini-pill.category-stats { background: rgba(110, 180, 140, 0.16); border-color: rgba(110,180,140,.28); }
 .pill.category-regulation, .mini-pill.category-regulation { background: rgba(255, 120, 64, 0.16); border-color: rgba(255,120,64,.25); }
 .pill.category-market, .mini-pill.category-market { background: rgba(84, 151, 255, 0.16); border-color: rgba(84,151,255,.25); }
 .pill.category-default, .mini-pill.category-default { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.12); }

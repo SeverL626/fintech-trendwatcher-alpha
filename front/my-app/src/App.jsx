@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 
 const API = import.meta.env.VITE_API_URL ?? ''
-const SIGNALS_PAGE_SIZE = 100
+const PAGE_SIZE = 50
 
 function loadAuth() {
   try {
@@ -46,6 +46,53 @@ function CustomSelect({ value, onChange, options }) {
   );
 }
 
+function MultiSelect({ values, onChange, options, placeholder }) {
+  const [isOpen, setIsOpen] = React.useState(false)
+  const selected = Array.isArray(values) ? values : []
+  const selectedLabels = options
+    .filter((option) => selected.includes(String(option.value)))
+    .map((option) => option.label)
+  const label = selectedLabels.length ? selectedLabels.join(', ') : placeholder
+
+  const toggleValue = (value) => {
+    const text = String(value)
+    onChange(selected.includes(text)
+      ? selected.filter((item) => item !== text)
+      : [...selected, text])
+  }
+
+  return (
+    <div className="custom-select multi-select">
+      <div className="select-trigger" onClick={() => setIsOpen(!isOpen)}>
+        {label}
+      </div>
+
+      {isOpen && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setIsOpen(false)} />
+          <div className="select-options">
+            <div
+              className={`select-option ${selected.length === 0 ? 'active' : ''}`}
+              onClick={() => onChange([])}
+            >
+              {placeholder}
+            </div>
+            {options.map((opt) => (
+              <div
+                key={opt.value}
+                className={`select-option ${selected.includes(String(opt.value)) ? 'active' : ''}`}
+                onClick={() => toggleValue(opt.value)}
+              >
+                {opt.label}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function routeUrl(path) {
   return `${window.location.origin}${window.location.pathname}#${path}`
 }
@@ -68,15 +115,39 @@ function signalTime(item) {
   return Number.isNaN(time) ? 0 : time
 }
 
+function compactDate(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function hotnessClass(value) {
+  return `hotness-${Number(value) || 0}`
+}
+
 function categoryClass(category) {
   const value = String(category || '').toLowerCase()
 
+  if (value.includes('регулирование') || value.includes('комплаенс')) return 'category-regulation'
+  if (value.includes('платеж') || value.includes('инфраструктур')) return 'category-payments'
+  if (value.includes('антифрод') || value.includes('кибер')) return 'category-antifraud'
+  if (value.includes('продукт') || value.includes('клиент')) return 'category-products'
+  if (value.includes('конкурент') || value.includes('банковский рынок')) return 'category-competitors'
+  if (value.includes('финтех') || value.includes('технолог')) return 'category-tech'
+  if (value.includes('идентифика') || value.includes('биометр')) return 'category-identity'
+  if (value.includes('санкц') || value.includes('огранич')) return 'category-sanctions'
+  if (value.includes('макро') || value.includes('ставк')) return 'category-macro'
+  if (value.includes('рынки') || value.includes('инвест')) return 'category-market'
+  if (value.includes('результат') || value.includes('отчет')) return 'category-reporting'
+  if (value.includes('статист') || value.includes('данн')) return 'category-stats'
   if (value.includes('банк') || value.includes('bank')) return 'category-banking'
-  if (value.includes('плат') || value.includes('pay')) return 'category-payments'
-  if (value.includes('ux') || value.includes('механ')) return 'category-ux'
-  if (value.includes('парт')) return 'category-partnership'
-  if (value.includes('регул')) return 'category-regulation'
-  if (value.includes('рынок')) return 'category-market'
   return 'category-default'
 }
 
@@ -109,8 +180,45 @@ async function apiFetch(path, options = {}, token = '') {
   return data
 }
 
+function updateMessage(data) {
+  const status = String(data?.update?.status || data?.status || '').toLowerCase()
+  const message = String(data?.update?.message || data?.message || '').toLowerCase()
+  if (status === 'busy' || message.includes('already running')) {
+    return 'Поиск уже идёт'
+  }
+  if (status === 'rate_limited' || message.includes('once every') || message.includes('recent')) {
+    return 'Поиск был произведён недавно'
+  }
+  return 'Поиск начат, время обновления займёт до 30 минут'
+}
+
+function updateErrorMessage(error) {
+  const message = String(error?.message || '').toLowerCase()
+  if (message.includes('already running')) return 'Поиск уже идёт'
+  if (message.includes('once every') || message.includes('recent')) return 'Поиск был произведён недавно'
+  return error.message
+}
+
 function Market({ market }) {
-  const data = Array.isArray(market) ? market : (market?.items || []);
+  const [items, setItems] = useState(Array.isArray(market) ? market : (market?.items || []))
+  const [hasMore, setHasMore] = useState(Boolean(market?.has_more))
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    setItems(Array.isArray(market) ? market : (market?.items || []))
+    setHasMore(Boolean(market?.has_more))
+  }, [market])
+
+  const loadMore = async () => {
+    setLoading(true)
+    try {
+      const data = await apiFetch(`/api/market?limit=${PAGE_SIZE}&offset=${items.length}`)
+      setItems((prev) => [...prev, ...(data.items || [])])
+      setHasMore(Boolean(data.has_more))
+    } finally {
+      setLoading(false)
+    }
+  }
 
   return (
     <div className="page">
@@ -119,7 +227,7 @@ function Market({ market }) {
       </section>
 
       <div className="card" style={{ marginTop: '20px', overflowX: 'auto', padding: '0' }}>
-        {data.length ? (
+        {items.length ? (
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '800px' }}>
             <thead>
               <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
@@ -132,7 +240,7 @@ function Market({ market }) {
               </tr>
             </thead>
             <tbody>
-              {data.map((item, index) => (
+              {items.map((item, index) => (
                 <tr key={index} style={{ borderBottom: '1px solid #eee' }}>
                   <td style={tdStyle}>{item.date}</td>
                   <td style={tdStyle}>{item.sec_count}</td>
@@ -148,6 +256,13 @@ function Market({ market }) {
           <div style={{ padding: '20px' }}>Данные не найдены в базе.</div>
         )}
       </div>
+      {hasMore ? (
+        <div className="load-more-row">
+          <button className="button ghost" onClick={loadMore} disabled={loading}>
+            {loading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -180,6 +295,7 @@ export default function App() {
   const [auth, setAuth] = useState(loadAuth())
   const [signals, setSignals] = useState([])
   const [market, setMarket] = useState([])
+  const [overview, setOverview] = useState({})
   const [favorites, setFavorites] = useState([])
   const [notifications, setNotifications] = useState([])
   const [settings, setSettings] = useState([])
@@ -207,13 +323,18 @@ export default function App() {
   }
 
   const refreshSignals = async () => {
-    const data = await apiFetch('/api/signals?limit=500')
+    const data = await apiFetch(`/api/signals?limit=${PAGE_SIZE}`)
     setSignals(data.items || [])
   }
 
   const refreshMarket = async () => {
-    const data = await apiFetch('/api/market')
-    setMarket(data.items || [])
+    const data = await apiFetch(`/api/market?limit=${PAGE_SIZE}`)
+    setMarket(data)
+  }
+
+  const refreshOverview = async () => {
+    const data = await apiFetch('/api/overview')
+    setOverview(data || {})
   }
 
   const refreshSession = async (token = auth?.token) => {
@@ -245,7 +366,7 @@ export default function App() {
   }
 
   const loadAll = async () => {
-    await Promise.all([refreshSignals(), refreshMarket()])
+    await Promise.all([refreshSignals(), refreshMarket(), refreshOverview()])
     if (auth?.token) {
       await refreshSession(auth.token)
       if (auth?.user?.role === 'admin') {
@@ -261,9 +382,10 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({}),
       }, auth?.token)
-      flash(data.update?.message || 'Обновление запущено')
+      flash(updateMessage(data))
+      await refreshOverview()
     } catch (error) {
-      flash(error.message)
+      flash(updateErrorMessage(error))
     } finally {
       setUpdating(false)
     }
@@ -377,7 +499,7 @@ export default function App() {
      <main className="page-wrap">
   <Routes>
     {/* Открытые страницы */}
-    <Route path="/" element={<HomePage signals={signalCardList} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} onRunUpdate={runUpdate} updating={updating} />} />
+    <Route path="/" element={<HomePage signals={signalCardList} overview={overview} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} onRunUpdate={runUpdate} updating={updating} />} />
     <Route path="/about" element={<AboutPage />} />
     <Route path="/register" element={<RegisterPage onAuth={persistAuth} />} />
     <Route path="/login" element={<LoginPage onAuth={persistAuth} />} />
@@ -385,7 +507,7 @@ export default function App() {
     {/* Защищенные страницы (только для авторизованных) */}
     <Route path="/cards" element={
       <ProtectedRoute auth={auth}>
-        <CardsPage signals={signalCardList} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} />
+        <CardsPage signals={signalCardList} overview={overview} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} />
       </ProtectedRoute>
     } />
     <Route path="/offtop-news" element={
@@ -443,7 +565,7 @@ function TopBar({ auth, onLogout }) {
   const links = [
     ['/', 'Главная'],
     ['/about', 'О проекте'],
-    ['/cards', 'Карточки'],
+    ['/cards', 'FinTech News'],
     ['/offtop-news', 'Offtop news'],
     ['/search', 'Поиск'],
     ['/moex', 'MOEX'],
@@ -532,7 +654,7 @@ function ToastBar({ item, onClose }) {
   )
 }
 
-function HomePage({ signals, favorites = [], auth, onToggleFavorite, onRunUpdate, updating }) {
+function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavorite, onRunUpdate, updating }) {
   const filteredSignals = useMemo(() =>
     signals.filter(s => Number(s.hotness) > 1),
     [signals]
@@ -548,13 +670,12 @@ function HomePage({ signals, favorites = [], auth, onToggleFavorite, onRunUpdate
   const hot3 = sorted.filter((item) => Number(item.hotness) === 3).slice(0, 3)
 
   const counts = {
-    total: signals.length,
-    topics: new Set(signals.map((item) => item.category).filter(Boolean)).size,
-    sources: new Set(signals.map((item) => item.source_name).filter(Boolean)).size,
-    h5: signals.filter((item) => Number(item.hotness) === 5).length,
-    h4: signals.filter((item) => Number(item.hotness) === 4).length,
-    h3: signals.filter((item) => Number(item.hotness) === 3).length,
-    h1: signals.filter((item) => Number(item.hotness) === 1).length,
+    observations: overview.observations ?? signals.length,
+    topics: overview.categories ?? new Set(signals.map((item) => item.category).filter(Boolean)).size,
+    sources: overview.sources ?? new Set(signals.map((item) => item.source_name).filter(Boolean)).size,
+    important: overview.important ?? signals.filter((item) => Number(item.hotness) >= 4).length,
+    lastParsed: compactDate(overview.last_parsed_at),
+    lastUpdate: compactDate(overview.last_update_at),
   }
 
   return (
@@ -568,9 +689,9 @@ function HomePage({ signals, favorites = [], auth, onToggleFavorite, onRunUpdate
             по hotness 5, 4 и 3.
           </p>
           <div className="hero-actions">
-            <Link to="/cards" className="button primary">Открыть карточки</Link>
+            <Link to="/cards" className="button primary">Открыть FinTech News</Link>
             <Link to="/search" className="button ghost">Открыть поиск</Link>
-            {auth?.user?.role === 'admin' ? (
+            {auth ? (
               <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
                 {updating ? 'Запускаю...' : 'Обновить базу'}
               </button>
@@ -580,13 +701,12 @@ function HomePage({ signals, favorites = [], auth, onToggleFavorite, onRunUpdate
 
         <div className="hero-panel">
           <div className="kpi-grid">
-            <Kpi label="Всего карточек" value={counts.total} />
-            <Kpi label="Тем" value={counts.topics} />
+            <Kpi label="Наблюдений" value={counts.observations} />
             <Kpi label="Источников" value={counts.sources} />
-            <Kpi label="Hotness 5" value={counts.h5} />
-            <Kpi label="Hotness 4" value={counts.h4} />
-            <Kpi label="Hotness 3" value={counts.h3} />
-            <Kpi label="Hotness 1" value={counts.h1} />
+            <Kpi label="Категорий" value={counts.topics} />
+            <Kpi label="Важное" value={counts.important} />
+            <Kpi label="Последний парсинг" value={counts.lastParsed} />
+            <Kpi label="Обновление базы" value={counts.lastUpdate} />
           </div>
         </div>
       </section>
@@ -597,7 +717,7 @@ function HomePage({ signals, favorites = [], auth, onToggleFavorite, onRunUpdate
             <span className="eyebrow">Последние новости</span>
             <h2>Показываем только свежие карточки</h2>
           </div>
-          <Link to="/cards" className="button ghost">Все карточки</Link>
+          <Link to="/cards" className="button ghost">Все FinTech News</Link>
         </div>
 
         <div className="latest-layout">
@@ -637,31 +757,65 @@ function AboutPage() {
 
 function SearchPage({ signals, favorites = [], auth, onToggleFavorite }) {
   const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+  const [hasMore, setHasMore] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
-  const results = useMemo(() => {
-    const q = query.trim().toLowerCase()
-
-    const list = (signals || []).filter((item) => Number(item.hotness) !== 1)
-
-    if (!q) return list.slice(0, 12)
-
-    return list.filter((item) => {
-      return [
-        item.headline,
-        item.summary,
-        item.why_now,
-        item.category,
-        item.source_name,
-      ].join(' ').toLowerCase().includes(q)
+  const buildSearchPath = (offset) => {
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+      sort: 'time_desc',
+      hotness: '2,3,4,5',
     })
-  }, [signals, query])
+    if (query.trim()) params.set('q', query.trim())
+    return `/api/signals?${params.toString()}`
+  }
+
+  const loadResults = async (reset = false) => {
+    const offset = reset ? 0 : results.length
+    setLoading(true)
+    setError('')
+    try {
+      const data = await apiFetch(buildSearchPath(offset))
+      const items = data.items || []
+      setResults((prev) => reset ? items : [...prev, ...items])
+      setHasMore(Boolean(data.has_more))
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setError('')
+    ;(async () => {
+      try {
+        const data = await apiFetch(buildSearchPath(0))
+        if (!alive) return
+        setResults(data.items || [])
+        setHasMore(Boolean(data.has_more))
+      } catch (err) {
+        if (alive) setError(err.message)
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [query])
 
   return (
     <div className="stack">
       <section className="card search-window">
         <span className="eyebrow">Поиск карточек</span>
         <h1>Отдельное окно поиска</h1>
-        <p>Поиск вынесен отдельно и не мешает вкладке «Карточки».</p>
+        <p>Поиск вынесен отдельно и не мешает вкладке FinTech News.</p>
         <input
           className="search-input"
           placeholder="Ищи по теме, источнику, заголовку..."
@@ -671,7 +825,11 @@ function SearchPage({ signals, favorites = [], auth, onToggleFavorite }) {
       </section>
 
       <section className="cards-grid">
-        {results.map((item) => (
+        {error ? (
+          <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
+            <p className="muted">{error}</p>
+          </div>
+        ) : results.length ? results.map((item) => (
           <SignalCard
             key={item.id}
             item={item}
@@ -679,17 +837,29 @@ function SearchPage({ signals, favorites = [], auth, onToggleFavorite }) {
             onToggleFavorite={onToggleFavorite}
             favorite={favorites.some((fav) => fav.id === item.id)}
           />
-        ))}
+        )) : (
+          <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
+            <p className="muted">{loading ? 'Загружаю...' : 'Ничего не найдено'}</p>
+          </div>
+        )}
       </section>
+
+      {hasMore ? (
+        <div className="load-more-row">
+          <button className="button ghost" onClick={() => loadResults(false)} disabled={loading}>
+            {loading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
 
-function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
+function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavorite }) {
   const [sortBy, setSortBy] = useState('time_desc')
-  const [category, setCategory] = useState('all')
-  const [source, setSource] = useState('all')
-  const [hotness, setHotness] = useState('all')
+  const [category, setCategory] = useState([])
+  const [source, setSource] = useState([])
+  const [hotness, setHotness] = useState([])
   const [timeRange, setTimeRange] = useState('all')
   const [pageSignals, setPageSignals] = useState([])
   const [hasMore, setHasMore] = useState(false)
@@ -698,13 +868,13 @@ function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
 
   const buildCardsPath = (offset) => {
     const params = new URLSearchParams({
-      limit: String(SIGNALS_PAGE_SIZE),
+      limit: String(PAGE_SIZE),
       offset: String(offset),
       sort: sortBy,
     })
-    if (category !== 'all') params.set('category', category)
-    if (source !== 'all') params.set('source', source)
-    if (hotness !== 'all') params.set('hotness', hotness)
+    if (category.length) params.set('category', category.join(','))
+    if (source.length) params.set('source', source.join(','))
+    if (hotness.length) params.set('hotness', hotness.join(','))
     if (timeRange !== 'all') params.set('time_range', timeRange)
     return `/api/signals?${params.toString()}`
   }
@@ -747,14 +917,14 @@ function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
   }, [sortBy, category, source, hotness, timeRange])
 
   const topics = useMemo(() => {
-    const values = signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.category).filter(Boolean)
-    return ['all', ...new Set(values)]
-  }, [signals])
+    const values = overview.category_options || signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.category).filter(Boolean)
+    return [...new Set(values)].map((value) => ({ value, label: value }))
+  }, [signals, overview.category_options])
 
   const sources = useMemo(() => {
-    const values = signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.source_name).filter(Boolean)
-    return ['all', ...new Set(values)]
-  }, [signals])
+    const values = overview.source_options || signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.source_name).filter(Boolean)
+    return [...new Set(values)].map((value) => ({ value, label: value }))
+  }, [signals, overview.source_options])
 
   const filtered = useMemo(() => {
     const now = Date.now()
@@ -762,9 +932,9 @@ function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
     let items = pageSignals.filter((item) => Number(item.hotness) !== 1)
 
     items = items.filter((item) => {
-      const byCategory = category === 'all' || item.category === category
-      const bySource = source === 'all' || item.source_name === source
-      const byHotness = hotness === 'all' || Number(item.hotness) === Number(hotness)
+      const byCategory = !category.length || category.includes(item.category)
+      const bySource = !source.length || source.includes(item.source_name)
+      const byHotness = !hotness.length || hotness.includes(String(item.hotness))
 
       const published = signalTime(item)
       const byTime =
@@ -795,8 +965,8 @@ function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
     <div className="stack">
       {/* 1. Заголовок страницы */}
       <section className="card page-head">
-        <span className="eyebrow">Карточки</span>
-        <h1>Все карточки</h1>
+        <span className="eyebrow">FinTech News</span>
+        <h1>FinTech News</h1>
         <p>Используйте фильтры ниже для сортировки и поиска по категориям.</p>
 
         {/* 2. Твой новый красивый тулбар */}
@@ -811,28 +981,33 @@ function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
             ]}
           />
 
-          <CustomSelect
+          <MultiSelect
             value={category}
+            values={category}
             onChange={setCategory}
-            options={topics.map(t => ({ value: t, label: t === 'all' ? 'Все темы' : t }))}
+            options={topics}
+            placeholder="Все темы"
           />
 
-          <CustomSelect
+          <MultiSelect
             value={source}
+            values={source}
             onChange={setSource}
-            options={sources.map(s => ({ value: s, label: s === 'all' ? 'Все источники' : s }))}
+            options={sources}
+            placeholder="Все источники"
           />
 
-          <CustomSelect
+          <MultiSelect
             value={hotness}
+            values={hotness}
             onChange={setHotness}
             options={[
-              { value: 'all', label: 'Любой hotness' },
               { value: '5', label: 'Hotness: 5' },
               { value: '4', label: 'Hotness: 4' },
               { value: '3', label: 'Hotness: 3' },
               { value: '2', label: 'Hotness: 2' }
             ]}
+            placeholder="Любой hotness"
           />
 
           <CustomSelect
@@ -876,7 +1051,7 @@ function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
       {hasMore ? (
         <div className="load-more-row">
           <button className="button ghost" onClick={() => loadCards(false)} disabled={cardsLoading}>
-            {cardsLoading ? 'Загружаю...' : `Загрузить ещё ${SIGNALS_PAGE_SIZE}`}
+            {cardsLoading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
           </button>
         </div>
       ) : null}
@@ -885,23 +1060,46 @@ function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
 }
 
 function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
-  const offTop = useMemo(() => {
-    return [...signals]
-      .filter((item) => Number(item.hotness) === 1)
-      .sort((a, b) => signalTime(b) - signalTime(a))
-  }, [signals])
+  const [items, setItems] = useState([])
+  const [hasMore, setHasMore] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const loadOfftop = async (reset = false) => {
+    const offset = reset ? 0 : items.length
+    setLoading(true)
+    setError('')
+    try {
+      const data = await apiFetch(`/api/signals?limit=${PAGE_SIZE}&offset=${offset}&hotness=1&sort=time_desc`)
+      const nextItems = data.items || []
+      setItems((prev) => reset ? nextItems : [...prev, ...nextItems])
+      setHasMore(Boolean(data.has_more))
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadOfftop(true)
+  }, [])
 
   return (
     <div className="stack">
       <section className="card page-head">
         <span className="eyebrow">Offtop news</span>
-        <h1>Новости с hotness 1</h1>
+        <h1>Offtop</h1>
         <p>Эти карточки убраны из общей вкладки и показываются здесь отдельно.</p>
       </section>
 
-      {offTop.length ? (
+      {error ? (
+        <section className="card center-card">
+          <p className="muted">{error}</p>
+        </section>
+      ) : items.length ? (
         <section className="cards-grid">
-          {offTop.map((item) => (
+          {items.map((item) => (
             <SignalCard
               key={item.id}
               item={item}
@@ -913,10 +1111,18 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
         </section>
       ) : (
         <section className="card center-card">
-          <h2>Пока нет новостей с hotness 1</h2>
+          <h2>{loading ? 'Загружаю...' : 'Пока нет offtop-новостей'}</h2>
           <p>Когда такие карточки появятся, они будут отображаться здесь.</p>
         </section>
       )}
+
+      {hasMore ? (
+        <div className="load-more-row">
+          <button className="button ghost" onClick={() => loadOfftop(false)} disabled={loading}>
+            {loading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1038,7 +1244,7 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
           <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span>
           <h3>{item.headline}</h3>
         </div>
-        <span className="hot-badge">Hotness {item.hotness}</span>
+        <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span>
       </div>
 
       <div className="signal-meta">
@@ -1493,9 +1699,9 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
         method: 'POST',
         body: JSON.stringify({}),
       }, auth.token)
-      setNotice(data.update?.message || 'Обновление запущено')
+      setNotice(updateMessage(data))
     } catch (err) {
-      setNotice(err.message)
+      setNotice(updateErrorMessage(err))
     }
   };
 
@@ -1675,9 +1881,10 @@ function RequireAdmin({ auth, children }) {
 }
 
 function Kpi({ label, value }) {
+  const isText = Number.isNaN(Number(value))
   return (
     <div className="kpi">
-      <div className="kpi-value">{value}</div>
+      <div className={`kpi-value ${isText ? 'text-value' : ''}`}>{value}</div>
       <div className="kpi-label">{label}</div>
     </div>
   )

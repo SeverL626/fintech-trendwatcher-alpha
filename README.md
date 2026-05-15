@@ -6,9 +6,9 @@
 
 **Promo codes:** REDCAT2026, TRENDWOTCHER, FINTECHCAT
 
-admin@redcat.local
+manager@redcat.tu
 
-Admin12345!
+rqbqerj1543tgjkq
 
 ## Архитектура
 

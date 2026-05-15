@@ -26,6 +26,7 @@ MAIN_DB_PATH = Path(os.getenv("MAIN_DB_PATH") or os.getenv("DB_PATH") or ROOT_DI
 FRONT_BACKEND_DB_PATH = Path(os.getenv("FRONT_BACKEND_DB_PATH") or ROOT_DIR / "data" / "redcat.db")
 UPDATE_API_URL = os.getenv("UPDATE_API_URL", "http://127.0.0.1:5000/update")
 UPDATE_STATUS_URL = os.getenv("UPDATE_STATUS_URL", "http://127.0.0.1:5000/update/status")
+MAX_API_LIMIT = 10000
 
 db = SQLAlchemy()
 jwt = JWTManager()
@@ -182,10 +183,13 @@ class SystemState(db.Model):
 
 
 
+RETIRED_ADMIN_EMAILS = {
+    "admin@redcat.local",
+    "lead@redcat.local",
+}
+
 SAMPLE_USERS = [
-    {"full_name": "Admin Red Cat", "email": "admin@redcat.local", "password": "Admin12345!", "role": "admin",
-     "activated": True},
-    {"full_name": "Lead Analyst", "email": "lead@redcat.local", "password": "Lead12345!", "role": "admin",
+    {"full_name": "Manager Red Cat", "email": "manager@redcat.tu", "password": "rqbqerj1543tgjkq", "role": "admin",
      "activated": True},
     {"full_name": "Test User", "email": "user@redcat.local", "password": "User12345!", "role": "user",
      "activated": True},
@@ -204,12 +208,30 @@ def parse_int(value, default=0):
         return default
 
 
-def normalize_api_limit(value, default=100, maximum=500):
+def normalize_api_limit(value, default=100, maximum=MAX_API_LIMIT):
     try:
         limit = int(value)
     except (TypeError, ValueError):
         limit = default
     return max(1, min(maximum, limit))
+
+
+def parse_multi_values(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        raw_values = value
+    else:
+        raw_values = str(value).split(",")
+    result = []
+    seen = set()
+    for item in raw_values:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 @contextmanager
@@ -327,7 +349,10 @@ def signal_to_frontend_item(signal, raw_news=None):
     }
 
 
-def signal_matches_filters(item, query="", category="", source="", hotness="", time_range=""):
+def signal_matches_filters(item, query="", categories=None, sources=None, hotness_values=None, time_range=""):
+    categories = categories or []
+    sources = sources or []
+    hotness_values = hotness_values or []
     q = (query or "").strip().lower()
     if q:
         haystack = " ".join(str(item.get(key) or "") for key in (
@@ -341,11 +366,12 @@ def signal_matches_filters(item, query="", category="", source="", hotness="", t
         if q not in haystack:
             return False
 
-    if category and item.get("category") != category:
+    if categories and item.get("category") not in categories:
         return False
-    if source and item.get("source_name") != source:
+    item_sources = item.get("sources") if isinstance(item.get("sources"), list) else [item.get("source_name")]
+    if sources and not any(source in sources for source in item_sources):
         return False
-    if hotness and parse_int(item.get("hotness")) != parse_int(hotness):
+    if hotness_values and parse_int(item.get("hotness")) not in {parse_int(value) for value in hotness_values}:
         return False
 
     if time_range:
@@ -378,14 +404,17 @@ def list_main_signals_page(
         return {"items": [], "has_more": False}
 
     offset = max(0, parse_int(offset, 0))
+    categories = parse_multi_values(category)
+    sources = parse_multi_values(source)
+    hotness_values = parse_multi_values(hotness)
     where = ["(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"]
     params = []
-    if category:
-        where.append("category = ?")
-        params.append(category)
-    if hotness:
-        where.append("hotness = ?")
-        params.append(parse_int(hotness))
+    if categories:
+        where.append(f"category IN ({','.join('?' for _ in categories)})")
+        params.extend(categories)
+    if hotness_values:
+        where.append(f"hotness IN ({','.join('?' for _ in hotness_values)})")
+        params.extend(parse_int(value) for value in hotness_values)
 
     order_by = "id DESC"
     if sort_by == "time_asc":
@@ -394,10 +423,12 @@ def list_main_signals_page(
         order_by = "hotness DESC, id DESC"
 
     sql_where = " AND ".join(where)
-    sql_offset = 0
+    needs_post_filter = bool(query or sources or time_range)
+    sql_offset = 0 if needs_post_filter else offset
+    post_filter_offset = offset if needs_post_filter else 0
     skipped = 0
     items = []
-    chunk_size = 500
+    chunk_size = min(max(limit + 1, 50), 500)
     with connect_main_db() as connection:
         while len(items) <= limit:
             signal_rows = connection.execute(f"""
@@ -415,9 +446,16 @@ def list_main_signals_page(
                 signal = dict(row)
                 raw_news = load_raw_news_for_signal(connection, parse_signal_source_ids(signal.get("sources")))
                 item = signal_to_frontend_item(signal, raw_news)
-                if not signal_matches_filters(item, query, category="", source=source, hotness="", time_range=time_range):
+                if not signal_matches_filters(
+                    item,
+                    query=query,
+                    categories=[],
+                    sources=sources,
+                    hotness_values=[],
+                    time_range=time_range,
+                ):
                     continue
-                if skipped < offset:
+                if skipped < post_filter_offset:
                     skipped += 1
                     continue
                 items.append(item)
@@ -434,6 +472,90 @@ def list_main_signals_page(
 
 def list_main_signals(limit=100, query=""):
     return list_main_signals_page(limit=limit, query=query)["items"]
+
+
+def load_update_status_snapshot():
+    try:
+        response = requests.get(UPDATE_STATUS_URL, timeout=3)
+        if response.ok:
+            return response.json().get("update") or response.json()
+    except requests.RequestException:
+        pass
+    return {}
+
+
+def get_main_overview():
+    overview = {
+        "observations": 0,
+        "sources": 0,
+        "categories": 0,
+        "important": 0,
+        "last_parsed_at": None,
+        "last_update_at": None,
+        "category_options": [],
+        "source_options": [],
+    }
+    if not MAIN_DB_PATH.exists():
+        return overview
+
+    with connect_main_db() as connection:
+        visible_filter = "(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"
+        row = connection.execute(f"""
+            SELECT
+                COUNT(*) AS observations,
+                COUNT(DISTINCT category) AS categories,
+                SUM(CASE WHEN hotness >= 4 THEN 1 ELSE 0 END) AS important
+            FROM signals
+            WHERE {visible_filter}
+        """).fetchone()
+        if row:
+            overview["observations"] = row["observations"] or 0
+            overview["categories"] = row["categories"] or 0
+            overview["important"] = row["important"] or 0
+
+        category_rows = connection.execute(f"""
+            SELECT DISTINCT category
+            FROM signals
+            WHERE {visible_filter}
+              AND category IS NOT NULL
+              AND TRIM(category) != ''
+            ORDER BY category
+        """).fetchall()
+        overview["category_options"] = [row["category"] for row in category_rows]
+
+        source_row = connection.execute("""
+            SELECT COUNT(DISTINCT source_id) AS sources
+            FROM raw_news
+        """).fetchone()
+        if source_row:
+            overview["sources"] = source_row["sources"] or 0
+
+        source_rows = connection.execute("""
+            SELECT DISTINCT s.name AS name
+            FROM raw_news rn
+            JOIN sources s ON s.id = rn.source_id
+            WHERE s.name IS NOT NULL
+              AND TRIM(s.name) != ''
+            ORDER BY s.name
+        """).fetchall()
+        overview["source_options"] = [row["name"] for row in source_rows]
+
+        parsed_row = connection.execute("""
+            SELECT MAX(parsed_at) AS last_parsed_at
+            FROM raw_news
+        """).fetchone()
+        if parsed_row:
+            overview["last_parsed_at"] = parsed_row["last_parsed_at"]
+
+    update_status = load_update_status_snapshot()
+    overview["last_update_at"] = update_status.get("finished_at") or update_status.get("started_at")
+    if not overview["last_update_at"]:
+        try:
+            overview["last_update_at"] = datetime.fromtimestamp(MAIN_DB_PATH.stat().st_mtime, UTC).isoformat()
+        except OSError:
+            overview["last_update_at"] = None
+
+    return overview
 
 
 def get_main_signal(signal_id):
@@ -475,9 +597,9 @@ def format_market_number(value):
         return value
 
 
-def list_main_market(limit=100):
+def list_main_market(limit=100, offset=0):
     if not MAIN_DB_PATH.exists():
-        return []
+        return {"items": [], "has_more": False}
 
     with connect_main_db() as connection:
         rows = connection.execute("""
@@ -493,9 +615,10 @@ def list_main_market(limit=100):
             FROM moex_daily_stats
             ORDER BY date(trade_date) DESC, id DESC
             LIMIT ?
-        """, (limit,)).fetchall()
+            OFFSET ?
+        """, (limit + 1, max(0, parse_int(offset, 0)))).fetchall()
 
-    return [
+    items = [
         {
             "date": row["trade_date"],
             "sec_count": row["securities_count"] or row["traded_securities_count"],
@@ -504,8 +627,12 @@ def list_main_market(limit=100):
             "top_ticker": row["top_secid"] or row["top_shortname"],
             "top_value": format_market_number(row["top_value"]),
         }
-        for row in rows
+        for row in rows[:limit]
     ]
+    return {
+        "items": items,
+        "has_more": len(rows) > limit,
+    }
 
 
 def proxy_backend_update():
@@ -554,19 +681,35 @@ def ensure_state():
     return state
 
 
+def remove_retired_admin_users():
+    users = User.query.filter(User.email.in_(RETIRED_ADMIN_EMAILS)).all()
+    if not users:
+        return
+
+    user_ids = [user.id for user in users]
+    Favorite.query.filter(Favorite.user_id.in_(user_ids)).delete(synchronize_session=False)
+    NotificationSetting.query.filter(NotificationSetting.user_id.in_(user_ids)).delete(synchronize_session=False)
+    NotificationItem.query.filter(NotificationItem.user_id.in_(user_ids)).delete(synchronize_session=False)
+    User.query.filter(User.id.in_(user_ids)).delete(synchronize_session=False)
+    db.session.commit()
+
+
+def upsert_seed_users():
+    for item in SAMPLE_USERS:
+        user = User.query.filter_by(email=item["email"]).first()
+        if not user:
+            user = User(email=item["email"])
+            db.session.add(user)
+        user.full_name = item["full_name"]
+        user.password_hash = generate_password_hash(item["password"])
+        user.role = item["role"]
+        user.activated = item["activated"]
+    db.session.commit()
+
+
 def seed_data():
-    if not User.query.first():
-        for item in SAMPLE_USERS:
-            db.session.add(
-                User(
-                    full_name=item["full_name"],
-                    email=item["email"],
-                    password_hash=generate_password_hash(item["password"]),
-                    role=item["role"],
-                    activated=item["activated"],
-                )
-            )
-        db.session.commit()
+    remove_retired_admin_users()
+    upsert_seed_users()
 
     if not PromoCode.query.first():
         for item in SAMPLE_PROMOS:
@@ -771,7 +914,7 @@ def create_app(test_config=None):
     @app.get("/api/signals")
     def get_signals():
         q = (request.args.get("q") or "").strip()
-        limit = normalize_api_limit(request.args.get("limit"), 100, 500)
+        limit = normalize_api_limit(request.args.get("limit"), 100)
         page = list_main_signals_page(
             limit=limit,
             offset=request.args.get("offset"),
@@ -793,8 +936,12 @@ def create_app(test_config=None):
 
     @app.get("/api/market")
     def get_market():
-        limit = normalize_api_limit(request.args.get("limit"), 100, 500)
-        return jsonify({"items": list_main_market(limit=limit)})
+        limit = normalize_api_limit(request.args.get("limit"), 50)
+        return jsonify(list_main_market(limit=limit, offset=request.args.get("offset")))
+
+    @app.get("/api/overview")
+    def get_overview():
+        return jsonify(get_main_overview())
 
     @app.post("/api/register")
     def register():
