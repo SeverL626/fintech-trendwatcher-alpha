@@ -327,42 +327,113 @@ def signal_to_frontend_item(signal, raw_news=None):
     }
 
 
-def list_main_signals(limit=100, query=""):
-    if not MAIN_DB_PATH.exists():
-        return []
+def signal_matches_filters(item, query="", category="", source="", hotness="", time_range=""):
+    q = (query or "").strip().lower()
+    if q:
+        haystack = " ".join(str(item.get(key) or "") for key in (
+            "headline",
+            "category",
+            "summary",
+            "why_now",
+            "draft",
+            "source_name",
+        )).lower()
+        if q not in haystack:
+            return False
 
-    fetch_limit = max(limit, 500) if query else limit
+    if category and item.get("category") != category:
+        return False
+    if source and item.get("source_name") != source:
+        return False
+    if hotness and parse_int(item.get("hotness")) != parse_int(hotness):
+        return False
+
+    if time_range:
+        event_time = parse_datetime(item.get("published_at") or item.get("created_at"))
+        if not event_time:
+            return False
+        age = utcnow() - event_time
+        ranges = {
+            "day": timedelta(days=1),
+            "week": timedelta(days=7),
+            "month": timedelta(days=30),
+        }
+        if time_range in ranges and age > ranges[time_range]:
+            return False
+
+    return True
+
+
+def list_main_signals_page(
+    limit=100,
+    offset=0,
+    query="",
+    category="",
+    source="",
+    hotness="",
+    time_range="",
+    sort_by="time_desc",
+):
+    if not MAIN_DB_PATH.exists():
+        return {"items": [], "has_more": False}
+
+    offset = max(0, parse_int(offset, 0))
+    where = ["(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"]
+    params = []
+    if category:
+        where.append("category = ?")
+        params.append(category)
+    if hotness:
+        where.append("hotness = ?")
+        params.append(parse_int(hotness))
+
+    order_by = "id DESC"
+    if sort_by == "time_asc":
+        order_by = "id ASC"
+    elif sort_by == "hotness":
+        order_by = "hotness DESC, id DESC"
+
+    sql_where = " AND ".join(where)
+    sql_offset = 0
+    skipped = 0
+    items = []
+    chunk_size = 500
     with connect_main_db() as connection:
-        signal_rows = connection.execute("""
+        while len(items) <= limit:
+            signal_rows = connection.execute(f"""
             SELECT id, headline, hotness, why_now, category, sources, summary, draft
             FROM signals
-            WHERE draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %'
-            ORDER BY id DESC
+            WHERE {sql_where}
+            ORDER BY {order_by}
             LIMIT ?
-        """, (fetch_limit,)).fetchall()
-
-        items = []
-        q = (query or "").strip().lower()
-        for row in signal_rows:
-            signal = dict(row)
-            raw_news = load_raw_news_for_signal(connection, parse_signal_source_ids(signal.get("sources")))
-            item = signal_to_frontend_item(signal, raw_news)
-            if q:
-                haystack = " ".join(str(item.get(key) or "") for key in (
-                    "headline",
-                    "category",
-                    "summary",
-                    "why_now",
-                    "draft",
-                    "source_name",
-                )).lower()
-                if q not in haystack:
-                    continue
-            items.append(item)
-            if len(items) >= limit:
+            OFFSET ?
+            """, (*params, chunk_size, sql_offset)).fetchall()
+            if not signal_rows:
                 break
 
-    return items
+            for row in signal_rows:
+                signal = dict(row)
+                raw_news = load_raw_news_for_signal(connection, parse_signal_source_ids(signal.get("sources")))
+                item = signal_to_frontend_item(signal, raw_news)
+                if not signal_matches_filters(item, query, category="", source=source, hotness="", time_range=time_range):
+                    continue
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                items.append(item)
+                if len(items) > limit:
+                    break
+
+            sql_offset += len(signal_rows)
+
+    return {
+        "items": items[:limit],
+        "has_more": len(items) > limit,
+    }
+
+
+def list_main_signals(limit=100, query=""):
+    return list_main_signals_page(limit=limit, query=query)["items"]
 
 
 def get_main_signal(signal_id):
@@ -631,6 +702,7 @@ def create_app(test_config=None):
         return jsonify({"ok": True})
 
     @app.post("/api/update")
+    @admin_only
     def run_update():
         return proxy_backend_update()
 
@@ -700,7 +772,17 @@ def create_app(test_config=None):
     def get_signals():
         q = (request.args.get("q") or "").strip()
         limit = normalize_api_limit(request.args.get("limit"), 100, 500)
-        return jsonify({"items": list_main_signals(limit=limit, query=q)})
+        page = list_main_signals_page(
+            limit=limit,
+            offset=request.args.get("offset"),
+            query=q,
+            category=(request.args.get("category") or "").strip(),
+            source=(request.args.get("source") or "").strip(),
+            hotness=(request.args.get("hotness") or "").strip(),
+            time_range=(request.args.get("time_range") or "").strip(),
+            sort_by=(request.args.get("sort") or "time_desc").strip(),
+        )
+        return jsonify(page)
 
     @app.get("/api/signals/<int:signal_id>")
     def get_signal(signal_id):
