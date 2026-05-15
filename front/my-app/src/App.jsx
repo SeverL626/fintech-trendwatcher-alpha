@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 
 const API = import.meta.env.VITE_API_URL ?? ''
+const SIGNALS_PAGE_SIZE = 100
 
 function loadAuth() {
   try {
@@ -59,6 +60,12 @@ function formatDate(value) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function signalTime(item) {
+  const value = item?.published_at || item?.created_at
+  const time = new Date(value).getTime()
+  return Number.isNaN(time) ? 0 : time
 }
 
 function categoryClass(category) {
@@ -200,7 +207,7 @@ export default function App() {
   }
 
   const refreshSignals = async () => {
-    const data = await apiFetch('/api/signals?limit=100')
+    const data = await apiFetch('/api/signals?limit=500')
     setSignals(data.items || [])
   }
 
@@ -370,7 +377,7 @@ export default function App() {
      <main className="page-wrap">
   <Routes>
     {/* Открытые страницы */}
-    <Route path="/" element={<HomePage signals={signalCardList} onRunUpdate={runUpdate} updating={updating} />} />
+    <Route path="/" element={<HomePage signals={signalCardList} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} onRunUpdate={runUpdate} updating={updating} />} />
     <Route path="/about" element={<AboutPage />} />
     <Route path="/register" element={<RegisterPage onAuth={persistAuth} />} />
     <Route path="/login" element={<LoginPage onAuth={persistAuth} />} />
@@ -388,7 +395,7 @@ export default function App() {
     } />
     <Route path="/search" element={
       <ProtectedRoute auth={auth}>
-        <SearchPage signals={signalCardList} auth={auth} onToggleFavorite={toggleFavorite} />
+        <SearchPage signals={signalCardList} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} />
       </ProtectedRoute>
     } />
     <Route path="/signals/:id" element={
@@ -401,12 +408,12 @@ export default function App() {
     } />
     <Route path="/notifications" element={
       <ProtectedRoute auth={auth}>
-        <NotificationsPage auth={auth} notifications={notifications} settings={settings} onSaveSettings={saveNotificationSettings} onClear={clearNotifications} />
+        <NotificationsPage auth={auth} signals={signalCardList} notifications={notifications} settings={settings} onSaveSettings={saveNotificationSettings} onClear={clearNotifications} />
       </ProtectedRoute>
     } />
     <Route path="/saved" element={
       <ProtectedRoute auth={auth}>
-        <SavedPage auth={auth} favorites={favorites} signals={signalCardList} onToggleFavorite={toggleFavorite} />
+        <SavedPage auth={auth} favorites={favorites} onToggleFavorite={toggleFavorite} />
       </ProtectedRoute>
     } />
     <Route path="/account" element={
@@ -525,21 +532,20 @@ function ToastBar({ item, onClose }) {
   )
 }
 
-function HomePage({ signals, onRunUpdate, updating }) {
+function HomePage({ signals, favorites = [], auth, onToggleFavorite, onRunUpdate, updating }) {
   const filteredSignals = useMemo(() =>
     signals.filter(s => Number(s.hotness) > 1),
     [signals]
   );
 
   const sorted = useMemo(
-    () => [...filteredSignals].sort((a, b) => new Date(b.published_at) - new Date(a.published_at)),
+    () => [...filteredSignals].sort((a, b) => signalTime(b) - signalTime(a)),
     [filteredSignals],
   )
 
   const hot5 = sorted.filter((item) => Number(item.hotness) === 5).slice(0, 1)
   const hot4 = sorted.filter((item) => Number(item.hotness) === 4).slice(0, 2)
   const hot3 = sorted.filter((item) => Number(item.hotness) === 3).slice(0, 3)
-  const hot1 = sorted.filter((item) => Number(item.hotness) === 1).length
 
   const counts = {
     total: signals.length,
@@ -548,7 +554,7 @@ function HomePage({ signals, onRunUpdate, updating }) {
     h5: signals.filter((item) => Number(item.hotness) === 5).length,
     h4: signals.filter((item) => Number(item.hotness) === 4).length,
     h3: signals.filter((item) => Number(item.hotness) === 3).length,
-    h1: hot1,
+    h1: signals.filter((item) => Number(item.hotness) === 1).length,
   }
 
   return (
@@ -564,9 +570,11 @@ function HomePage({ signals, onRunUpdate, updating }) {
           <div className="hero-actions">
             <Link to="/cards" className="button primary">Открыть карточки</Link>
             <Link to="/search" className="button ghost">Открыть поиск</Link>
-            <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
-              {updating ? 'Запускаю...' : 'Обновить базу'}
-            </button>
+            {auth?.user?.role === 'admin' ? (
+              <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
+                {updating ? 'Запускаю...' : 'Обновить базу'}
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -595,19 +603,19 @@ function HomePage({ signals, onRunUpdate, updating }) {
         <div className="latest-layout">
           {hot5.length ? (
             <div className="latest-row one">
-              {hot5.map((item) => <SignalCard key={item.id} item={item} variant="large" />)}
+              {hot5.map((item) => <SignalCard key={item.id} item={item} auth={auth} onToggleFavorite={onToggleFavorite} favorite={favorites.some((fav) => fav.id === item.id)} variant="large" />)}
             </div>
           ) : null}
 
           {hot4.length ? (
             <div className="latest-row two">
-              {hot4.map((item) => <SignalCard key={item.id} item={item} variant="medium" />)}
+              {hot4.map((item) => <SignalCard key={item.id} item={item} auth={auth} onToggleFavorite={onToggleFavorite} favorite={favorites.some((fav) => fav.id === item.id)} variant="medium" />)}
             </div>
           ) : null}
 
           {hot3.length ? (
             <div className="latest-row three">
-              {hot3.map((item) => <SignalCard key={item.id} item={item} variant="small" />)}
+              {hot3.map((item) => <SignalCard key={item.id} item={item} auth={auth} onToggleFavorite={onToggleFavorite} favorite={favorites.some((fav) => fav.id === item.id)} variant="small" />)}
             </div>
           ) : null}
         </div>
@@ -621,24 +629,13 @@ function AboutPage() {
     <div className="stack">
       <section className="card page-head">
         <span className="eyebrow">О проекте</span>
-        <h1>Что это за проект</h1>
-        <p>
-          Red Cat — учебный прототип трендвотчера для финтех-публикаций. Он показывает, как из уже
-          обработанных карточек собрать понятный дайджест для команды.
-        </p>
-      </section>
-
-      <section className="grid-2">
-        <InfoCard title="Для кого" text="Для продуктовой, аналитической и стратегической команды банка." />
-        <InfoCard title="Что делает" text="Показывает карточки, сортирует, фильтрует, даёт поиск и избранное." />
-        <InfoCard title="На чём собран" text="React + Flask + SQLAlchemy + SQLite." />
-        <InfoCard title="Кто разрабатывал" text="Проект собран как демонстрация фронтенда и backend-части." />
+        <h1>Скоро разместим информацию.</h1>
       </section>
     </div>
   )
 }
 
-function SearchPage({ signals, auth, onToggleFavorite }) {
+function SearchPage({ signals, favorites = [], auth, onToggleFavorite }) {
   const [query, setQuery] = useState('')
 
   const results = useMemo(() => {
@@ -680,7 +677,7 @@ function SearchPage({ signals, auth, onToggleFavorite }) {
             item={item}
             auth={auth}
             onToggleFavorite={onToggleFavorite}
-            favorite={false}
+            favorite={favorites.some((fav) => fav.id === item.id)}
           />
         ))}
       </section>
@@ -688,12 +685,66 @@ function SearchPage({ signals, auth, onToggleFavorite }) {
   )
 }
 
-function CardsPage({ signals, favorites, auth, onToggleFavorite }) {
+function CardsPage({ signals, favorites = [], auth, onToggleFavorite }) {
   const [sortBy, setSortBy] = useState('time_desc')
   const [category, setCategory] = useState('all')
   const [source, setSource] = useState('all')
   const [hotness, setHotness] = useState('all')
   const [timeRange, setTimeRange] = useState('all')
+  const [pageSignals, setPageSignals] = useState([])
+  const [hasMore, setHasMore] = useState(false)
+  const [cardsLoading, setCardsLoading] = useState(false)
+  const [cardsError, setCardsError] = useState('')
+
+  const buildCardsPath = (offset) => {
+    const params = new URLSearchParams({
+      limit: String(SIGNALS_PAGE_SIZE),
+      offset: String(offset),
+      sort: sortBy,
+    })
+    if (category !== 'all') params.set('category', category)
+    if (source !== 'all') params.set('source', source)
+    if (hotness !== 'all') params.set('hotness', hotness)
+    if (timeRange !== 'all') params.set('time_range', timeRange)
+    return `/api/signals?${params.toString()}`
+  }
+
+  const loadCards = async (reset = false) => {
+    const offset = reset ? 0 : pageSignals.length
+    setCardsLoading(true)
+    setCardsError('')
+    try {
+      const data = await apiFetch(buildCardsPath(offset))
+      const items = data.items || []
+      setPageSignals((prev) => reset ? items : [...prev, ...items])
+      setHasMore(Boolean(data.has_more))
+    } catch (error) {
+      setCardsError(error.message)
+    } finally {
+      setCardsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    let alive = true
+    setCardsLoading(true)
+    setCardsError('')
+    ;(async () => {
+      try {
+        const data = await apiFetch(buildCardsPath(0))
+        if (!alive) return
+        setPageSignals(data.items || [])
+        setHasMore(Boolean(data.has_more))
+      } catch (error) {
+        if (alive) setCardsError(error.message)
+      } finally {
+        if (alive) setCardsLoading(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [sortBy, category, source, hotness, timeRange])
 
   const topics = useMemo(() => {
     const values = signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.category).filter(Boolean)
@@ -708,26 +759,26 @@ function CardsPage({ signals, favorites, auth, onToggleFavorite }) {
   const filtered = useMemo(() => {
     const now = Date.now()
 
-    let items = signals.filter((item) => Number(item.hotness) !== 1)
+    let items = pageSignals.filter((item) => Number(item.hotness) !== 1)
 
     items = items.filter((item) => {
       const byCategory = category === 'all' || item.category === category
       const bySource = source === 'all' || item.source_name === source
       const byHotness = hotness === 'all' || Number(item.hotness) === Number(hotness)
 
-      const published = new Date(item.published_at || item.created_at).getTime()
+      const published = signalTime(item)
       const byTime =
         timeRange === 'all' ||
-        (timeRange === 'day' && now - published <= 24 * 60 * 60 * 1000) ||
-        (timeRange === 'week' && now - published <= 7 * 24 * 60 * 60 * 1000) ||
-        (timeRange === 'month' && now - published <= 30 * 24 * 60 * 60 * 1000)
+        (published > 0 && timeRange === 'day' && now - published <= 24 * 60 * 60 * 1000) ||
+        (published > 0 && timeRange === 'week' && now - published <= 7 * 24 * 60 * 60 * 1000) ||
+        (published > 0 && timeRange === 'month' && now - published <= 30 * 24 * 60 * 60 * 1000)
 
       return byCategory && bySource && byHotness && byTime
     })
 
     items = [...items].sort((a, b) => {
-      const ta = new Date(a.published_at || a.created_at).getTime()
-      const tb = new Date(b.published_at || b.created_at).getTime()
+      const ta = signalTime(a)
+      const tb = signalTime(b)
 
       if (sortBy === 'hotness') {
         return Number(b.hotness) - Number(a.hotness) || tb - ta
@@ -738,7 +789,7 @@ function CardsPage({ signals, favorites, auth, onToggleFavorite }) {
     })
 
     return items
-  }, [signals, sortBy, category, source, hotness, timeRange])
+  }, [pageSignals, sortBy, category, source, hotness, timeRange])
 
   return (
     <div className="stack">
@@ -801,7 +852,11 @@ function CardsPage({ signals, favorites, auth, onToggleFavorite }) {
 
       {/* 3. САМОЕ ГЛАВНОЕ: Сетка с карточками, которую мы потеряли */}
       <section className="cards-grid">
-        {filtered.length > 0 ? (
+        {cardsError ? (
+          <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
+            <p className="muted">{cardsError}</p>
+          </div>
+        ) : filtered.length > 0 ? (
           filtered.map((item) => (
             <SignalCard
               key={item.id}
@@ -813,19 +868,27 @@ function CardsPage({ signals, favorites, auth, onToggleFavorite }) {
           ))
         ) : (
           <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
-            <p className="muted">Ничего не найдено по вашим фильтрам</p>
+            <p className="muted">{cardsLoading ? 'Загружаю карточки...' : 'Ничего не найдено по вашим фильтрам'}</p>
           </div>
         )}
       </section>
+
+      {hasMore ? (
+        <div className="load-more-row">
+          <button className="button ghost" onClick={() => loadCards(false)} disabled={cardsLoading}>
+            {cardsLoading ? 'Загружаю...' : `Загрузить ещё ${SIGNALS_PAGE_SIZE}`}
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
 
-function OfftopNewsPage({ signals, auth, onToggleFavorite }) {
+function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
   const offTop = useMemo(() => {
     return [...signals]
       .filter((item) => Number(item.hotness) === 1)
-      .sort((a, b) => new Date(b.published_at || b.created_at) - new Date(a.published_at || a.created_at))
+      .sort((a, b) => signalTime(b) - signalTime(a))
   }, [signals])
 
   return (
@@ -844,7 +907,7 @@ function OfftopNewsPage({ signals, auth, onToggleFavorite }) {
               item={item}
               auth={auth}
               onToggleFavorite={onToggleFavorite}
-              favorite={false}
+              favorite={favorites.some((fav) => fav.id === item.id)}
             />
           ))}
         </section>
@@ -860,9 +923,46 @@ function OfftopNewsPage({ signals, auth, onToggleFavorite }) {
 
 function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
   const { id } = useParams();
-  const item = signals.find((s) => String(s.id) === String(id));
+  const cachedItem = signals.find((s) => String(s.id) === String(id));
+  const [remoteItem, setRemoteItem] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
-  if (!item) return <div className="card">Карточка не найдена</div>;
+  useEffect(() => {
+    let alive = true
+
+    if (cachedItem) {
+      setRemoteItem(null)
+      setError('')
+      return () => {
+        alive = false
+      }
+    }
+
+    setLoading(true)
+    setError('')
+    setRemoteItem(null)
+
+    apiFetch(`/api/signals/${id}`)
+      .then((data) => {
+        if (alive) setRemoteItem(data.item || null)
+      })
+      .catch((err) => {
+        if (alive) setError(err.message)
+      })
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
+
+    return () => {
+      alive = false
+    }
+  }, [id, cachedItem])
+
+  const item = cachedItem || remoteItem;
+
+  if (loading) return <div className="card">Загружаю карточку...</div>;
+  if (!item) return <div className="card">{error || 'Карточка не найдена'}</div>;
 
   const sourceUrls = Array.isArray(item.source_urls) && item.source_urls.length
     ? item.source_urls.slice(0, 3)
@@ -965,12 +1065,10 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
   )
 }
 
-function SavedPage({ auth, favorites, signals, onToggleFavorite }) {
+function SavedPage({ auth, favorites, onToggleFavorite }) {
   const savedSignals = useMemo(() => {
-    return favorites
-      .map((fav) => signals.find((signal) => signal.id === fav.id))
-      .filter(Boolean)
-  }, [favorites, signals])
+    return favorites || []
+  }, [favorites])
 
   if (!auth) {
     return (
@@ -1003,34 +1101,34 @@ function SavedPage({ auth, favorites, signals, onToggleFavorite }) {
   )
 }
 
-function NotificationsPage({ auth, notifications, settings, onSaveSettings, onClear }) {
-  // Убрали onRebuild из пропсов (Пункт 9)
+function NotificationsPage({ auth, signals, notifications, settings, onSaveSettings, onClear }) {
   const [rules, setRules] = useState(settings.length ? settings : [{ theme: '', source_name: '', hotness_min: '' }])
 
   useEffect(() => {
     setRules(settings.length ? settings : [{ theme: '', source_name: '', hotness_min: '' }])
   }, [settings])
 
-  // Подготовка опций для CustomSelect (Пункт 1)
-  const topicOptions = [
-    { value: '', label: 'Любая тема' },
-    { value: 'банковский продукт', label: 'банковский продукт' },
-    { value: 'платёжный сервис', label: 'платёжный сервис' },
-    { value: 'UX-механика', label: 'UX-механика' },
-    { value: 'партнёрство', label: 'партнёрство' },
-    { value: 'регулирование', label: 'регулирование' },
-    { value: 'рынок', label: 'рынок' }
-  ];
+  const topicOptions = useMemo(() => {
+    const values = new Set()
+    ;(signals || []).forEach((item) => {
+      if (item.category) values.add(item.category)
+    })
+    ;(rules || []).forEach((rule) => {
+      if (rule.theme) values.add(rule.theme)
+    })
+    return [{ value: '', label: 'Любая тема' }, ...[...values].sort().map((value) => ({ value, label: value }))]
+  }, [signals, rules])
 
-  const sourceOptions = [
-    { value: '', label: 'Любой источник' },
-    { value: 'vc.ru', label: 'vc.ru' },
-    { value: 'rb.ru', label: 'rb.ru' },
-    { value: 'cnews', label: 'cnews' },
-    { value: 'interfax', label: 'interfax' },
-    { value: 'forklog', label: 'forklog' },
-    { value: 'thebell', label: 'thebell' }
-  ];
+  const sourceOptions = useMemo(() => {
+    const values = new Set()
+    ;(signals || []).forEach((item) => {
+      if (item.source_name) values.add(item.source_name)
+    })
+    ;(rules || []).forEach((rule) => {
+      if (rule.source_name) values.add(rule.source_name)
+    })
+    return [{ value: '', label: 'Любой источник' }, ...[...values].sort().map((value) => ({ value, label: value }))]
+  }, [signals, rules])
 
   const hotnessOptions = [
     { value: '', label: 'Любой hotness' },
@@ -1088,7 +1186,6 @@ function NotificationsPage({ auth, notifications, settings, onSaveSettings, onCl
         <p>Можно создать несколько независимых правил. Они не мешают друг другу.</p>
         <div className="hero-actions">
           <button className="button ghost" onClick={onClear}>Очистить уведомления</button>
-          {/* Кнопка "Обновить из базы" удалена (Пункт 9) */}
         </div>
       </section>
 
@@ -1104,7 +1201,6 @@ function NotificationsPage({ auth, notifications, settings, onSaveSettings, onCl
         <div className="rules-list">
           {rules.map((rule, index) => (
             <div className="rule-row" key={index}>
-              {/* Замена на CustomSelect (Пункт 1) */}
               <CustomSelect
                 value={rule.theme}
                 options={topicOptions}
@@ -1393,21 +1489,13 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
   const handleForceUpdate = async () => {
     if (!window.confirm("Запустить принудительное обновление базы?")) return;
     try {
-      const res = await fetch(`${API}/api/admin/update`, {
+      const data = await apiFetch('/api/admin/update', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${auth.access_token || auth.token}` // Проверь название поля с токеном
-        }
-      });
-      const data = await res.json();
-      if (res.ok) {
-        alert("База успешно обновлена!");
-        window.location.reload();
-      } else {
-        alert("Ошибка: " + (data.error || data.message));
-      }
+        body: JSON.stringify({}),
+      }, auth.token)
+      setNotice(data.update?.message || 'Обновление запущено')
     } catch (err) {
-      alert("Ошибка сети при обращении к серверу");
+      setNotice(err.message)
     }
   };
 
@@ -1423,13 +1511,12 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
     e.preventDefault()
     if (!current) return
     try {
-      // Используем auth.access_token или auth.token в зависимости от твоей структуры
       await apiFetch(`/api/admin/users/${current.id}`, {
         method: 'PUT',
         body: JSON.stringify({ full_name: fullName, email, role, activated }),
-      }, auth.access_token || auth.token)
+      }, auth.token)
 
-      await refreshAdmin(auth.access_token || auth.token)
+      await refreshAdmin(auth.token)
       setNotice('Пользователь обновлён')
     } catch (error) {
       setNotice(error.message)

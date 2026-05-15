@@ -20,13 +20,17 @@ OPENROUTER_MAX_RETRIES = 3
 OPENROUTER_RETRY_SECONDS = 20
 OPENROUTER_EMBEDDING_REQUEST_DELAY_SECONDS = 0
 DEFAULT_SIMILARITY_THRESHOLD = 0.62
-DUPLICATE_LOOKBACK_DAYS = 7
+DUPLICATE_LOOKBACK_DAYS = 1
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_PCA_ENABLED = True
 DEFAULT_PCA_REMOVE_COMPONENTS = 1
 DEFAULT_PCA_WHITEN = False
-DEFAULT_PCA_MIN_SIGNALS = 2
+DEFAULT_PCA_MIN_SIGNALS = 20
 DEFAULT_PCA_EPSILON = 1e-6
+DEFAULT_PCA_MAX_FIT_SIGNALS = 1500
+DEFAULT_PCA_RANDOM_SEED = 42
+PCA_PROJECTION_BLOCK_SIZE = 256
+SIMILARITY_SEARCH_MODE = "streaming_row_dot"
 DUPLICATE_PREFIX = "DUBLICATE OF "
 CURRENCY_RATES_PHRASE = "курсы валют"
 SPECIAL_SUMMARIES = {
@@ -63,6 +67,7 @@ def process_signal_duplicates(
             for signal in weekly_signals
             if is_dedup_eligible(signal)
         ]
+        hydrate_signal_embeddings(eligible_signals)
         excluded_signals = len(weekly_signals) - len(eligible_signals)
         candidates_to_embed = [
             signal
@@ -138,13 +143,29 @@ def load_dedup_signals(db):
     signals = []
     for row in rows:
         signal = dict(row)
-        draft_data = parse_draft_json(signal.get("draft"))
+        draft = signal.get("draft") or ""
         signal["source_ids"] = parse_source_ids(signal.get("sources"))
-        signal["embedding"] = draft_data.get("embedding") if isinstance(draft_data, dict) else None
-        signal["dedup_checked"] = bool(draft_data.get("dedup_checked_at")) if isinstance(draft_data, dict) else False
+        signal["embedding"] = None
+        signal["dedup_checked"] = '"dedup_checked_at"' in draft
         signal["is_duplicate"] = is_duplicate_draft(signal.get("draft"))
         signals.append(signal)
     return signals
+
+
+def hydrate_signal_embeddings(signals):
+    for signal in signals:
+        draft_data = parse_draft_json(signal.get("draft"))
+        if not draft_data:
+            continue
+
+        embedding = draft_data.get("embedding")
+        if is_valid_embedding(embedding):
+            signal["embedding"] = embedding
+        signal["dedup_checked"] = bool(draft_data.get("dedup_checked_at"))
+
+
+def is_valid_embedding(value):
+    return isinstance(value, list) and bool(value)
 
 
 def is_dedup_eligible(signal):
@@ -308,9 +329,55 @@ def find_duplicate_groups(signals, new_ids, similarity_threshold):
     if not signals_with_embeddings or not new_ids:
         return [], make_pca_summary(DEFAULT_PCA_ENABLED, False, len(signals_with_embeddings), "no_embeddings_or_new_ids")
 
+    buckets = {}
+    for signal in signals_with_embeddings:
+        buckets.setdefault(get_duplicate_bucket_key(signal), []).append(signal)
+
+    groups = []
+    bucket_summaries = []
+    for bucket_key, bucket_signals in sorted(buckets.items()):
+        bucket_new_ids = {signal["id"] for signal in bucket_signals if signal["id"] in new_ids}
+        if not bucket_new_ids:
+            continue
+
+        bucket_groups, bucket_summary = find_duplicate_groups_in_bucket(
+            bucket_signals,
+            bucket_new_ids,
+            similarity_threshold,
+        )
+        bucket_summary["category"] = bucket_key
+        bucket_summaries.append(bucket_summary)
+        groups.extend(bucket_groups)
+
+    return groups, make_duplicate_search_summary(signals_with_embeddings, buckets, bucket_summaries)
+
+
+def get_duplicate_bucket_key(signal):
+    return clean_text(signal.get("category")).casefold() or "unknown"
+
+
+def make_duplicate_search_summary(signals, buckets, bucket_summaries):
+    applied_summaries = [summary for summary in bucket_summaries if summary.get("applied")]
+    largest_bucket = max((len(bucket) for bucket in buckets.values()), default=0)
+    return {
+        "enabled": DEFAULT_PCA_ENABLED,
+        "applied": bool(applied_summaries),
+        "reason": "category_buckets",
+        "signals": len(signals),
+        "lookback_days": DUPLICATE_LOOKBACK_DAYS,
+        "category_buckets": len(buckets),
+        "largest_bucket": largest_bucket,
+        "similarity_mode": SIMILARITY_SEARCH_MODE,
+        "full_similarity_matrix": False,
+        "buckets": bucket_summaries,
+    }
+
+
+def find_duplicate_groups_in_bucket(signals_with_embeddings, new_ids, similarity_threshold):
     embeddings = np.array([signal["embedding"] for signal in signals_with_embeddings], dtype=np.float32)
     normalized, pca_summary = prepare_duplicate_vectors(embeddings)
-    similarity_matrix = np.dot(normalized, normalized.T)
+    pca_summary["similarity_mode"] = SIMILARITY_SEARCH_MODE
+    pca_summary["full_similarity_matrix"] = False
 
     index_by_id = {signal["id"]: index for index, signal in enumerate(signals_with_embeddings)}
     processed_ids = set()
@@ -322,7 +389,8 @@ def find_duplicate_groups(signals, new_ids, similarity_threshold):
             continue
 
         signal_index = index_by_id[signal_id]
-        similar_indices = np.where(similarity_matrix[signal_index] >= similarity_threshold)[0]
+        similarities = normalized @ normalized[signal_index]
+        similar_indices = np.flatnonzero(similarities >= similarity_threshold)
         candidates = [signals_with_embeddings[index] for index in similar_indices]
         if len(candidates) <= 1:
             processed_ids.add(signal_id)
@@ -335,8 +403,10 @@ def find_duplicate_groups(signals, new_ids, similarity_threshold):
             processed_ids.add(signal_id)
             continue
 
+        base_index = index_by_id[base_signal["id"]]
+        base_similarities = normalized @ normalized[base_index]
         min_similarity = min(
-            float(similarity_matrix[index_by_id[base_signal["id"]], index_by_id[duplicate_signal["id"]]])
+            float(base_similarities[index_by_id[duplicate_signal["id"]]])
             for duplicate_signal in duplicate_signals
         )
         groups.append((
@@ -375,23 +445,42 @@ def remove_pca_components(embeddings, remove_components, whiten, min_signals, ep
     if max_components <= 0:
         return embeddings, make_pca_summary(True, False, signal_count, "no_components_to_remove")
 
-    centered = embeddings - np.mean(embeddings, axis=0, keepdims=True)
+    centered = embeddings.astype(np.float32, copy=False)
+    mean = np.mean(centered, axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
+    centered -= mean
+    fit_matrix = centered
+    fit_signal_count = signal_count
+    sampled = False
+    if signal_count > DEFAULT_PCA_MAX_FIT_SIGNALS:
+        rng = np.random.default_rng(DEFAULT_PCA_RANDOM_SEED)
+        sample_indices = np.sort(
+            rng.choice(signal_count, size=DEFAULT_PCA_MAX_FIT_SIGNALS, replace=False)
+        )
+        fit_matrix = centered[sample_indices]
+        fit_signal_count = len(sample_indices)
+        sampled = True
+
     try:
-        _, singular_values, principal_axes = np.linalg.svd(centered, full_matrices=False)
+        _, singular_values, principal_axes = np.linalg.svd(fit_matrix, full_matrices=False)
     except np.linalg.LinAlgError:
         return embeddings, make_pca_summary(True, False, signal_count, "svd_failed")
 
     components = principal_axes[:max_components]
-    common_signal = np.dot(np.dot(centered, components.T), components)
-    cleaned = centered - common_signal
+    cleaned = centered
+    for start in range(0, signal_count, PCA_PROJECTION_BLOCK_SIZE):
+        end = min(start + PCA_PROJECTION_BLOCK_SIZE, signal_count)
+        projection = cleaned[start:end] @ components.T
+        cleaned[start:end] -= projection @ components
 
     if whiten:
         remaining_components = principal_axes[max_components:]
         if len(remaining_components):
             remaining_values = singular_values[max_components:]
-            projected = np.dot(cleaned, remaining_components.T)
-            projected = projected / np.maximum(remaining_values, float(epsilon))
-            cleaned = np.dot(projected, remaining_components)
+            for start in range(0, signal_count, PCA_PROJECTION_BLOCK_SIZE):
+                end = min(start + PCA_PROJECTION_BLOCK_SIZE, signal_count)
+                projected = cleaned[start:end] @ remaining_components.T
+                projected = projected / np.maximum(remaining_values, float(epsilon))
+                cleaned[start:end] = projected @ remaining_components
 
     return cleaned.astype(np.float32), make_pca_summary(
         True,
@@ -400,16 +489,29 @@ def remove_pca_components(embeddings, remove_components, whiten, min_signals, ep
         "applied",
         removed_components=max_components,
         whiten=whiten,
+        fit_signals=fit_signal_count,
+        sampled=sampled,
     )
 
 
 def normalize_vectors(vectors):
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms[norms == 0] = 1
-    return vectors / norms
+    vectors = vectors.astype(np.float32, copy=False)
+    vectors /= norms.astype(np.float32, copy=False)
+    return vectors
 
 
-def make_pca_summary(enabled, applied, signal_count, reason, removed_components=0, whiten=None):
+def make_pca_summary(
+    enabled,
+    applied,
+    signal_count,
+    reason,
+    removed_components=0,
+    whiten=None,
+    fit_signals=None,
+    sampled=False,
+):
     return {
         "enabled": bool(enabled),
         "applied": bool(applied),
@@ -419,6 +521,9 @@ def make_pca_summary(enabled, applied, signal_count, reason, removed_components=
         "removed_components": removed_components,
         "whiten": DEFAULT_PCA_WHITEN if whiten is None else bool(whiten),
         "min_signals": DEFAULT_PCA_MIN_SIGNALS,
+        "max_fit_signals": DEFAULT_PCA_MAX_FIT_SIGNALS,
+        "fit_signals": signal_count if fit_signals is None else int(fit_signals),
+        "sampled": bool(sampled),
     }
 
 

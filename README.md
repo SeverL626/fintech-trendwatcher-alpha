@@ -1,13 +1,14 @@
 # Fintech Trendwatcher
 
+Сервис трендвотчера для финтех-публикаций: парсер собирает новости, модель OpenRouter превращает их в карточки сигналов, дедупликатор склеивает повторы, фронт показывает готовую витрину.
 
-АККАУНТЫ И ПРОМОКОДЫ ДЛЯ ДОСТУПА
-Promo codes: REDCAT2026, TRENDWOTCHER, FINTECHCAT
+ ## Admin access
+
+**Promo codes:** REDCAT2026, TRENDWOTCHER, FINTECHCAT
 
 admin@redcat.local
-Admin12345!
 
-Сервис трендвотчера для финтех-публикаций: парсер собирает новости, модель OpenRouter превращает их в карточки сигналов, дедупликатор склеивает повторы, фронт показывает готовую витрину.
+Admin12345!
 
 ## Архитектура
 
@@ -41,46 +42,7 @@ backend:  http://localhost:5000
 frontend-backend: http://localhost:5001
 ```
 
-Без Docker для backend:
-
-```powershell
-pip install -r requirements.txt
-python back\init_db.py
-python back\app.py
-```
-
-Без Docker для frontend:
-
-```powershell
-cd front\my-app
-npm install
-npm run dev
-```
-
 Vite dev server проксирует `/api` на `http://127.0.0.1:5001`, а `/update` и `/signals` на `http://127.0.0.1:5000`.
-
-## Environment
-
-`.env.example` содержит публичный шаблон. Реальный `.env` не коммитить.
-
-```env
-COMPOSE_PROJECT_NAME=alfa-hackiton
-
-BACKEND_CONTAINER_NAME=alfa-hackiton-backend-prod
-BACKEND_PORT=5000
-FRONT_BACKEND_CONTAINER_NAME=alfa-hackiton-frontend-backend-prod
-FRONT_BACKEND_PORT=5001
-FRONTEND_CONTAINER_NAME=alfa-hackiton-frontend-prod
-FRONTEND_PORT=5173
-JWT_SECRET_KEY=
-
-DB_PATH=/app/data/app.db
-OPENROUTER_API_KEY=sk-or-v1-...
-
-# Только для тестов
-UPDATE_PARSER_ONLY=0
-PARSER_ONLY_SOURCE_IDS=
-```
 
 ## API
 
@@ -96,7 +58,7 @@ POST /api/update           # запуск полного update из frontend
 POST /api/admin/update     # совместимый endpoint кнопки обновления
 ```
 
-Frontend также использует совместимые endpoints для demo-аккаунта, избранного и уведомлений (`/api/login`, `/api/me`, `/api/favorites`, `/api/notifications`). Они нужны, чтобы UI не падал; реальные данные для витрины идут из `/api/signals` и `/api/market`.
+Frontend также использует совместимые endpoints для demo-аккаунта, избранного и уведомлений (`/api/login`, `/api/me`, `/api/favorites`, `/api/notifications`). Реальные данные для витрины идут из `/api/signals` и `/api/market`.
 
 ## Update Pipeline
 
@@ -111,7 +73,7 @@ Frontend также использует совместимые endpoints для
 Особые правила дедупликации:
 
 - `hotness=1`, сухие отчёты и таблицы не сравниваются.
-- Дубли ищутся только в окне последней недели.
+- Дубли ищутся только в окне последнего дня.
 - Для `Курсы валют` главным дублем выбирается самая свежая карточка, чтобы показывать актуальный курс.
 
 Расписание:
