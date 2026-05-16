@@ -147,6 +147,11 @@ button { cursor: pointer; }
   grid-template-columns: 1.3fr 1fr;
   gap: 18px;
 }
+.hero-copy {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
 
 .hero h1,
 .page-head h1 {
@@ -183,6 +188,10 @@ button { cursor: pointer; }
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+.hero-copy .hero-actions {
+  margin-top: auto;
+  padding-top: 18px;
 }
 
 .button {
@@ -389,7 +398,9 @@ textarea { resize: vertical; }
   width: min(520px, calc(100% - 32px));
   z-index: 1000;
   text-align: center;
-  background: var(--card);
+  background: #f6f7fb;
+  color: #111827;
+  border-color: rgba(255,255,255,0.45);
   box-shadow: 0 22px 50px rgba(0,0,0,0.35);
 }
 

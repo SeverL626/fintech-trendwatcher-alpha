@@ -27,7 +27,7 @@ DEFAULT_PCA_REMOVE_COMPONENTS = 1
 DEFAULT_PCA_WHITEN = False
 DEFAULT_PCA_MIN_SIGNALS = 20
 DEFAULT_PCA_EPSILON = 1e-6
-DEFAULT_PCA_MAX_FIT_SIGNALS = 2500
+DEFAULT_PCA_MAX_FIT_SIGNALS = None
 DEFAULT_PCA_RANDOM_SEED = 42
 PCA_PROJECTION_BLOCK_SIZE = 256
 SIMILARITY_SEARCH_MODE = "streaming_row_dot"
@@ -56,19 +56,18 @@ def process_signal_duplicates(
             enrich_signal_metadata(signal, raw_news_by_id)
 
         signals_by_id = {signal["id"]: signal for signal in signals}
-        weekly_signals = [
+        candidate_signals = [
             signal
             for signal in signals
             if not signal.get("is_duplicate")
-            and is_inside_lookback(signal.get("event_at"), DUPLICATE_LOOKBACK_DAYS)
         ]
         eligible_signals = [
             signal
-            for signal in weekly_signals
+            for signal in candidate_signals
             if is_dedup_eligible(signal)
         ]
         hydrate_signal_embeddings(eligible_signals)
-        excluded_signals = len(weekly_signals) - len(eligible_signals)
+        excluded_signals = len(candidate_signals) - len(eligible_signals)
         candidates_to_embed = [
             signal
             for signal in eligible_signals
@@ -115,14 +114,14 @@ def process_signal_duplicates(
     finished_at = datetime.now()
     return {
         "processed_signals": len(eligible_signals),
-        "lookback_signals": len(weekly_signals),
+        "candidate_signals": len(candidate_signals),
         "excluded_signals": excluded_signals,
         "compared_signals": len(all_candidates),
         "embedded_signals": embeddings_created,
         "duplicates_marked": duplicates_marked,
         "merged_sources": merged_sources,
         "similarity_threshold": similarity_threshold,
-        "lookback_days": DUPLICATE_LOOKBACK_DAYS,
+        "pair_window_days": DUPLICATE_LOOKBACK_DAYS,
         "embedding_model": OPENROUTER_EMBEDDING_MODEL,
         "pca": pca_summary,
         "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
@@ -342,9 +341,9 @@ def make_duplicate_search_summary(signals, pca_summary):
     return {
         "enabled": DEFAULT_PCA_ENABLED,
         "applied": bool(pca_summary.get("applied")),
-        "reason": "global_week_window",
+        "reason": "global_dataset_pair_window",
         "signals": len(signals),
-        "lookback_days": DUPLICATE_LOOKBACK_DAYS,
+        "pair_window_days": DUPLICATE_LOOKBACK_DAYS,
         "similarity_mode": SIMILARITY_SEARCH_MODE,
         "full_similarity_matrix": False,
         "pca": pca_summary,
@@ -369,7 +368,11 @@ def find_duplicate_groups_in_bucket(signals_with_embeddings, new_ids, similarity
         signal_index = index_by_id[signal_id]
         similarities = normalized @ normalized[signal_index]
         similar_indices = np.flatnonzero(similarities >= similarity_threshold)
-        candidates = [signals_with_embeddings[index] for index in similar_indices]
+        candidates = [
+            signals_with_embeddings[index]
+            for index in similar_indices
+            if is_inside_pair_window(signal, signals_with_embeddings[index], DUPLICATE_LOOKBACK_DAYS)
+        ]
         if len(candidates) <= 1:
             processed_ids.add(signal_id)
             continue
@@ -429,7 +432,7 @@ def remove_pca_components(embeddings, remove_components, whiten, min_signals, ep
     fit_matrix = centered
     fit_signal_count = signal_count
     sampled = False
-    if signal_count > DEFAULT_PCA_MAX_FIT_SIGNALS:
+    if DEFAULT_PCA_MAX_FIT_SIGNALS and signal_count > DEFAULT_PCA_MAX_FIT_SIGNALS:
         rng = np.random.default_rng(DEFAULT_PCA_RANDOM_SEED)
         sample_indices = np.sort(
             rng.choice(signal_count, size=DEFAULT_PCA_MAX_FIT_SIGNALS, replace=False)
@@ -629,10 +632,12 @@ def parse_datetime(value):
         return None
 
 
-def is_inside_lookback(event_at, lookback_days):
-    if not event_at:
+def is_inside_pair_window(left_signal, right_signal, window_days):
+    left_at = left_signal.get("event_at")
+    right_at = right_signal.get("event_at")
+    if not left_at or not right_at:
         return True
-    return event_at >= datetime.now() - timedelta(days=lookback_days)
+    return abs(left_at - right_at) <= timedelta(days=window_days)
 
 
 def chunked(items, size):

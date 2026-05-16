@@ -792,7 +792,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
   return (
     <div className="stack">
       <section className="hero card">
-        <div>
+        <div className="hero-copy">
           <h1>Опережай тренды. Управляй будущим.</h1>
           <p>Учебный проект в рамках хакатона АльфаБанка для Лицея НИУ ВШЭ</p>
           <div className="hero-actions">
