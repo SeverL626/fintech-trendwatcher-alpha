@@ -526,12 +526,18 @@ textarea { resize: vertical; }
   min-height: 46px;
 }
 
-.search-window {
+.search-window,
+.search-form {
   padding: 22px;
   display: grid;
   gap: 14px;
 }
+.search-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 0;
+}
 .search-input { margin-top: 8px; }
+.search-form .search-input { margin-top: 0; }
 
 .detail-card { display: grid; gap: 18px; }
 .detail-head {

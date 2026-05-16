@@ -20,7 +20,7 @@ OPENROUTER_MAX_RETRIES = 3
 OPENROUTER_RETRY_SECONDS = 20
 OPENROUTER_EMBEDDING_REQUEST_DELAY_SECONDS = 0
 DEFAULT_SIMILARITY_THRESHOLD = 0.62
-DUPLICATE_LOOKBACK_DAYS = 1
+DUPLICATE_LOOKBACK_DAYS = 3
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_PCA_ENABLED = True
 DEFAULT_PCA_REMOVE_COMPONENTS = 1
@@ -329,47 +329,25 @@ def find_duplicate_groups(signals, new_ids, similarity_threshold):
     if not signals_with_embeddings or not new_ids:
         return [], make_pca_summary(DEFAULT_PCA_ENABLED, False, len(signals_with_embeddings), "no_embeddings_or_new_ids")
 
-    buckets = {}
-    for signal in signals_with_embeddings:
-        buckets.setdefault(get_duplicate_bucket_key(signal), []).append(signal)
+    groups, pca_summary = find_duplicate_groups_in_bucket(
+        signals_with_embeddings,
+        new_ids,
+        similarity_threshold,
+    )
 
-    groups = []
-    bucket_summaries = []
-    for bucket_key, bucket_signals in sorted(buckets.items()):
-        bucket_new_ids = {signal["id"] for signal in bucket_signals if signal["id"] in new_ids}
-        if not bucket_new_ids:
-            continue
-
-        bucket_groups, bucket_summary = find_duplicate_groups_in_bucket(
-            bucket_signals,
-            bucket_new_ids,
-            similarity_threshold,
-        )
-        bucket_summary["category"] = bucket_key
-        bucket_summaries.append(bucket_summary)
-        groups.extend(bucket_groups)
-
-    return groups, make_duplicate_search_summary(signals_with_embeddings, buckets, bucket_summaries)
+    return groups, make_duplicate_search_summary(signals_with_embeddings, pca_summary)
 
 
-def get_duplicate_bucket_key(signal):
-    return clean_text(signal.get("category")).casefold() or "unknown"
-
-
-def make_duplicate_search_summary(signals, buckets, bucket_summaries):
-    applied_summaries = [summary for summary in bucket_summaries if summary.get("applied")]
-    largest_bucket = max((len(bucket) for bucket in buckets.values()), default=0)
+def make_duplicate_search_summary(signals, pca_summary):
     return {
         "enabled": DEFAULT_PCA_ENABLED,
-        "applied": bool(applied_summaries),
-        "reason": "category_buckets",
+        "applied": bool(pca_summary.get("applied")),
+        "reason": "global_week_window",
         "signals": len(signals),
         "lookback_days": DUPLICATE_LOOKBACK_DAYS,
-        "category_buckets": len(buckets),
-        "largest_bucket": largest_bucket,
         "similarity_mode": SIMILARITY_SEARCH_MODE,
         "full_similarity_matrix": False,
-        "buckets": bucket_summaries,
+        "pca": pca_summary,
     }
 
 

@@ -525,17 +525,27 @@ def get_main_overview():
         return overview
 
     with connect_main_db() as connection:
+        raw_row = connection.execute("""
+            SELECT
+                COUNT(*) AS observations,
+                SUM(CASE WHEN datetime(COALESCE(parsed_at, published_at)) >= datetime('now', '-1 day') THEN 1 ELSE 0 END) AS last_24h,
+                SUM(CASE WHEN datetime(COALESCE(parsed_at, published_at)) >= datetime('now', '-7 day') THEN 1 ELSE 0 END) AS last_7d
+            FROM raw_news
+        """).fetchone()
+        if raw_row:
+            overview["observations"] = raw_row["observations"] or 0
+            overview["processed_last_24h"] = raw_row["last_24h"] or 0
+            overview["processed_last_7d"] = raw_row["last_7d"] or 0
+
         visible_filter = "(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"
         row = connection.execute(f"""
             SELECT
-                COUNT(*) AS observations,
                 COUNT(DISTINCT category) AS categories,
                 SUM(CASE WHEN hotness >= 4 THEN 1 ELSE 0 END) AS important
             FROM signals
             WHERE {visible_filter}
         """).fetchone()
         if row:
-            overview["observations"] = row["observations"] or 0
             overview["categories"] = row["categories"] or 0
             overview["important"] = row["important"] or 0
 
@@ -555,22 +565,6 @@ def get_main_overview():
         """).fetchone()
         if source_row:
             overview["sources"] = source_row["sources"] or 0
-
-        processed_row = connection.execute("""
-            SELECT COUNT(*) AS processed_last_24h
-            FROM raw_news
-            WHERE status = 'processed'
-              AND datetime(parsed_at) >= datetime('now', '-1 day')
-        """).fetchone()
-        overview["processed_last_24h"] = processed_row["processed_last_24h"] if processed_row else 0
-
-        weekly_row = connection.execute("""
-            SELECT COUNT(*) AS processed_last_7d
-            FROM raw_news
-            WHERE status = 'processed'
-              AND datetime(parsed_at) >= datetime('now', '-7 day')
-        """).fetchone()
-        overview["processed_last_7d"] = weekly_row["processed_last_7d"] if weekly_row else 0
 
         source_rows = connection.execute("""
             SELECT DISTINCT s.name AS name

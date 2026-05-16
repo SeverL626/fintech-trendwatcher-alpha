@@ -116,25 +116,6 @@ function signalTime(item) {
   return Number.isNaN(time) ? 0 : time
 }
 
-function matchesSearchQuery(item, query) {
-  const q = String(query || '').trim().toLowerCase()
-  if (!q) return true
-
-  const haystack = [
-    item?.headline,
-    item?.category,
-    item?.summary,
-    item?.why_now,
-    item?.source_name,
-    ...(Array.isArray(item?.sources) ? item.sources : []),
-    ...(Array.isArray(item?.raw_titles) ? item.raw_titles : []),
-    ...(Array.isArray(item?.source_urls) ? item.source_urls : []),
-    ...(Array.isArray(item?.raw_news_ids) ? item.raw_news_ids : []),
-  ].join(' ').toLowerCase()
-
-  return haystack.includes(q)
-}
-
 function compactDate(value) {
   if (!value) return '—'
   const date = new Date(value)
@@ -683,13 +664,13 @@ function TopBar({ auth, onLogout }) {
 
   return (
     <header className="topbar">
-      <div className="brand">
+      <Link to="/" className="brand">
         <img src="/logoRedCat.png" alt="Red Cat" />
         <div>
           <div className="brand-title">Red Cat</div>
           <div className="brand-subtitle">Trendwatcher</div>
         </div>
-      </div>
+      </Link>
 
       <nav className="nav">
         {links.map(([to, label]) => (
@@ -812,7 +793,6 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
     <div className="stack">
       <section className="hero card">
         <div>
-          <span className="eyebrow">Трендвотчер по финтех-публикациям</span>
           <h1>Опережай тренды. Управляй будущим.</h1>
           <p>Учебный проект в рамках хакатона АльфаБанка для Лицея НИУ ВШЭ</p>
           <div className="hero-actions">
@@ -857,7 +837,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
           ) : null}
         </div>
         <div className="pyramid-footer">
-          <Link to="/cards" className="button ghost">Все FinTech News</Link>
+          <Link to="/cards" className="button ghost">Больше</Link>
         </div>
       </section>
     </div>
@@ -868,7 +848,6 @@ function AboutPage() {
   return (
     <div className="stack">
       <section className="card page-head">
-        <span className="eyebrow">О проекте</span>
         <h1>Скоро разместим информацию.</h1>
       </section>
     </div>
@@ -876,6 +855,7 @@ function AboutPage() {
 }
 
 function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavorite }) {
+  const [searchInput, setSearchInput] = useState('')
   const [query, setQuery] = useState('')
   const [sortBy, setSortBy] = useState('hotness')
   const [category, setCategory] = useState([])
@@ -895,7 +875,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     })
     if (category.length) params.set('category', category.join(','))
     if (source.length) params.set('source', source.join(','))
-    if (hotness.length) params.set('hotness', hotness.join(','))
+    params.set('hotness', hotness.length ? hotness.join(',') : '2,3,4,5')
     if (timeRange !== 'all') params.set('time_range', timeRange)
     if (query.trim()) params.set('q', query.trim())
     return `/api/signals?${params.toString()}`
@@ -905,6 +885,10 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     const offset = reset ? 0 : pageSignals.length
     setCardsLoading(true)
     setCardsError('')
+    if (reset) {
+      setPageSignals([])
+      setHasMore(false)
+    }
     try {
       const data = await apiFetch(buildCardsPath(offset))
       const items = data.items || []
@@ -921,6 +905,8 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     let alive = true
     setCardsLoading(true)
     setCardsError('')
+    setPageSignals([])
+    setHasMore(false)
     ;(async () => {
       try {
         const data = await apiFetch(buildCardsPath(0))
@@ -938,6 +924,11 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     }
   }, [sortBy, category, source, hotness, timeRange, query])
 
+  const submitSearch = (event) => {
+    event.preventDefault()
+    setQuery(searchInput.trim())
+  }
+
   const topics = useMemo(() => {
     const values = overview.category_options || signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.category).filter(Boolean)
     return [...new Set(values)].map((value) => ({ value, label: value }))
@@ -948,55 +939,23 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     return [...new Set(values)].map((value) => ({ value, label: value }))
   }, [signals, overview.source_options])
 
-  const filtered = useMemo(() => {
-    const now = Date.now()
-
-    let items = pageSignals.filter((item) => Number(item.hotness) !== 1)
-
-    items = items.filter((item) => {
-      const byCategory = !category.length || category.includes(item.category)
-      const bySource = !source.length || source.includes(item.source_name)
-      const byHotness = !hotness.length || hotness.includes(String(item.hotness))
-      const byQuery = matchesSearchQuery(item, query)
-
-      const published = signalTime(item)
-      const byTime =
-        timeRange === 'all' ||
-        (published > 0 && timeRange === 'day' && now - published <= 24 * 60 * 60 * 1000) ||
-        (published > 0 && timeRange === 'week' && now - published <= 7 * 24 * 60 * 60 * 1000) ||
-        (published > 0 && timeRange === 'month' && now - published <= 30 * 24 * 60 * 60 * 1000)
-
-      return byCategory && bySource && byHotness && byQuery && byTime
-    })
-
-    items = [...items].sort((a, b) => {
-      const ta = signalTime(a)
-      const tb = signalTime(b)
-
-      if (sortBy === 'hotness') {
-        return Number(b.hotness) - Number(a.hotness) || tb - ta
-      }
-
-      if (sortBy === 'time_asc') return ta - tb
-      return tb - ta
-    })
-
-    return items
-  }, [pageSignals, sortBy, category, source, hotness, timeRange, query])
-
   return (
     <div className="stack">
       {/* 1. Заголовок страницы */}
       <section className="card page-head">
-        <span className="eyebrow">FinTech News</span>
         <h1>FinTech News</h1>
         <p>Используйте фильтры ниже для сортировки и поиска по категориям.</p>
-        <input
-          className="search-input"
-          placeholder="Поиск по теме, источнику, заголовку..."
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <form className="search-form" onSubmit={submitSearch}>
+          <input
+            className="search-input"
+            placeholder="Поиск по всей базе. Нажмите Enter для запуска."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+          <button className="button ghost" type="submit" disabled={cardsLoading}>
+            Найти
+          </button>
+        </form>
 
         {/* 2. Твой новый красивый тулбар */}
         <div className="cards-toolbar">
@@ -1060,8 +1019,8 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
           <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
             <p className="muted">{cardsError}</p>
           </div>
-        ) : filtered.length > 0 ? (
-          filtered.map((item) => (
+        ) : pageSignals.length > 0 ? (
+          pageSignals.map((item) => (
             <SignalCard
               key={item.id}
               item={item}
@@ -1089,6 +1048,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
 }
 
 function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
+  const [searchInput, setSearchInput] = useState('')
   const [query, setQuery] = useState('')
   const [items, setItems] = useState([])
   const [hasMore, setHasMore] = useState(false)
@@ -1099,6 +1059,10 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
     const offset = reset ? 0 : items.length
     setLoading(true)
     setError('')
+    if (reset) {
+      setItems([])
+      setHasMore(false)
+    }
     try {
       const params = new URLSearchParams({
         limit: String(PAGE_SIZE),
@@ -1122,32 +1086,36 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
     loadOfftop(true)
   }, [query])
 
-  const visibleItems = useMemo(
-    () => items.filter((item) => matchesSearchQuery(item, query)),
-    [items, query],
-  )
+  const submitSearch = (event) => {
+    event.preventDefault()
+    setQuery(searchInput.trim())
+  }
 
   return (
     <div className="stack">
       <section className="card page-head">
-        <span className="eyebrow">Offtop News</span>
         <h1>Offtop News</h1>
         <p>Эти карточки убраны из общей вкладки и показываются здесь отдельно.</p>
-        <input
-          className="search-input"
-          placeholder="Поиск по offtop-новостям..."
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <form className="search-form" onSubmit={submitSearch}>
+          <input
+            className="search-input"
+            placeholder="Поиск по всей базе offtop. Нажмите Enter для запуска."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+          <button className="button ghost" type="submit" disabled={loading}>
+            Найти
+          </button>
+        </form>
       </section>
 
       {error ? (
         <section className="card center-card">
           <p className="muted">{error}</p>
         </section>
-      ) : visibleItems.length ? (
+      ) : items.length ? (
         <section className="cards-grid">
-          {visibleItems.map((item) => (
+          {items.map((item) => (
             <SignalCard
               key={item.id}
               item={item}
@@ -1266,6 +1234,10 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
   const published = item.published_at || item.created_at
 
   const openInNewTab = () => {
+    if (offtop && item.url) {
+      window.open(item.url, '_blank', 'noopener,noreferrer')
+      return
+    }
     window.open(routeUrl(`/signals/${item.id}`), '_blank', 'noopener,noreferrer')
   }
 
@@ -1319,7 +1291,6 @@ function SavedPage({ auth, favorites, onToggleFavorite }) {
   return (
     <div className="stack">
       <section className="card page-head">
-        <span className="eyebrow">Сохранённые</span>
         <h1>Избранные новости</h1>
       </section>
 
@@ -1417,7 +1388,6 @@ function NotificationsPage({ auth, signals, notifications, settings, onSaveSetti
   return (
     <div className="stack">
       <section className="card page-head">
-        <span className="eyebrow">Уведомления</span>
         <h1>Настройки уведомлений</h1>
         <p>Можно создать несколько независимых правил. Они не мешают друг другу.</p>
         <div className="hero-actions">
@@ -1428,7 +1398,6 @@ function NotificationsPage({ auth, signals, notifications, settings, onSaveSetti
       <section className="card">
         <div className="section-head">
           <div>
-            <span className="eyebrow">Правила</span>
             <h2>Тема, источник и hotness</h2>
           </div>
           <button className="button ghost" onClick={addRule}>Добавить правило</button>
@@ -1537,7 +1506,7 @@ function AccountPage({ auth, onSaveProfile }) {
           {avatarUrl ? <img src={avatarUrl} alt="avatar" /> : <span>{String(auth.user?.full_name || '?').slice(0, 1).toUpperCase()}</span>}
         </div>
         <div>
-          <span className="eyebrow">{auth.user.role}</span>
+          {auth.user.role === 'admin' ? <span className="eyebrow">{auth.user.role}</span> : null}
           <h1>{auth.user.full_name}</h1>
           <p>{auth.user.email}</p>
           <p>{auth.user.activated ? 'Аккаунт активирован' : 'Аккаунт не активирован'}</p>
@@ -1628,7 +1597,6 @@ function RegisterPage({ onAuth }) {
   return (
     <div className="stack">
       <section className="card page-head">
-        <span className="eyebrow">Регистрация</span>
         <h1>Сначала ФИО, почта, пароль</h1>
         <p>Потом уже активация через оплату или промокод.</p>
       </section>
@@ -1695,7 +1663,6 @@ function LoginPage({ onAuth }) {
   return (
     <section className="card form-card">
       <div>
-        <span className="eyebrow">Вход</span>
         <h1>Войти в аккаунт</h1>
       </div>
       <form className="form-grid" onSubmit={login}>
@@ -1764,7 +1731,6 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
       <section className="card page-head">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <span className="eyebrow">Админка</span>
             <h1>Пользователи</h1>
             <p>Здесь можно редактировать роли и доступ.</p>
           </div>
@@ -1874,7 +1840,6 @@ function AdminPromosPage({ auth, promos, refreshAdmin }) {
   return (
     <div className="stack">
       <section className="card page-head">
-        <span className="eyebrow">Админка</span>
         <h1>Промокоды</h1>
       </section>
 
