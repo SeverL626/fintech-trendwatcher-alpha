@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone, UTC
 from contextlib import contextmanager
 from functools import wraps
 
@@ -27,6 +27,7 @@ FRONT_BACKEND_DB_PATH = Path(os.getenv("FRONT_BACKEND_DB_PATH") or ROOT_DIR / "d
 UPDATE_API_URL = os.getenv("UPDATE_API_URL", "http://127.0.0.1:5000/update")
 UPDATE_STATUS_URL = os.getenv("UPDATE_STATUS_URL", "http://127.0.0.1:5000/update/status")
 MAX_API_LIMIT = 10000
+MSK = timezone(timedelta(hours=3))
 
 db = SQLAlchemy()
 jwt = JWTManager()
@@ -298,6 +299,13 @@ def parse_datetime(value):
     return parsed.astimezone(UTC)
 
 
+def to_moscow_iso(value):
+    parsed = parse_datetime(value)
+    if not parsed:
+        return value
+    return parsed.astimezone(MSK).isoformat()
+
+
 def load_raw_news_for_signal(connection, raw_news_ids):
     if not raw_news_ids:
         return []
@@ -330,6 +338,17 @@ def signal_to_frontend_item(signal, raw_news=None):
     primary_raw = raw_news[0] if raw_news else {}
     source_names = unique_values(raw_row.get("source_name") for raw_row in raw_news)
     source_urls = unique_values(raw_row.get("url") for raw_row in raw_news)
+    raw_titles = unique_values(raw_row.get("title") for raw_row in raw_news)
+    source_links = []
+    seen_source_links = set()
+    for raw_row in raw_news:
+        url = str(raw_row.get("url") or "").strip()
+        name = str(raw_row.get("source_name") or "").strip()
+        key = url or name
+        if not key or key in seen_source_links:
+            continue
+        seen_source_links.add(key)
+        source_links.append({"url": url, "name": name})
 
     return {
         "id": signal["id"],
@@ -342,9 +361,11 @@ def signal_to_frontend_item(signal, raw_news=None):
         "sources": source_names,
         "source_name": ", ".join(source_names) if source_names else "Источник",
         "source_urls": source_urls,
+        "source_links": source_links,
+        "raw_titles": raw_titles,
         "url": primary_raw.get("url"),
-        "published_at": primary_raw.get("published_at") or primary_raw.get("parsed_at"),
-        "created_at": primary_raw.get("parsed_at"),
+        "published_at": to_moscow_iso(primary_raw.get("published_at") or primary_raw.get("parsed_at")),
+        "created_at": to_moscow_iso(primary_raw.get("parsed_at")),
         "raw_news_ids": source_ids,
     }
 
@@ -362,6 +383,9 @@ def signal_matches_filters(item, query="", categories=None, sources=None, hotnes
             "why_now",
             "draft",
             "source_name",
+            "raw_titles",
+            "source_urls",
+            "raw_news_ids",
         )).lower()
         if q not in haystack:
             return False
@@ -491,6 +515,7 @@ def get_main_overview():
         "categories": 0,
         "important": 0,
         "processed_last_24h": 0,
+        "processed_last_7d": 0,
         "last_parsed_at": None,
         "last_update_at": None,
         "category_options": [],
@@ -539,6 +564,14 @@ def get_main_overview():
         """).fetchone()
         overview["processed_last_24h"] = processed_row["processed_last_24h"] if processed_row else 0
 
+        weekly_row = connection.execute("""
+            SELECT COUNT(*) AS processed_last_7d
+            FROM raw_news
+            WHERE status = 'processed'
+              AND datetime(parsed_at) >= datetime('now', '-7 day')
+        """).fetchone()
+        overview["processed_last_7d"] = weekly_row["processed_last_7d"] if weekly_row else 0
+
         source_rows = connection.execute("""
             SELECT DISTINCT s.name AS name
             FROM raw_news rn
@@ -554,13 +587,13 @@ def get_main_overview():
             FROM raw_news
         """).fetchone()
         if parsed_row:
-            overview["last_parsed_at"] = parsed_row["last_parsed_at"]
+            overview["last_parsed_at"] = to_moscow_iso(parsed_row["last_parsed_at"])
 
     update_status = load_update_status_snapshot()
-    overview["last_update_at"] = update_status.get("finished_at") or update_status.get("started_at")
+    overview["last_update_at"] = to_moscow_iso(update_status.get("finished_at") or update_status.get("started_at"))
     if not overview["last_update_at"]:
         try:
-            overview["last_update_at"] = datetime.fromtimestamp(MAIN_DB_PATH.stat().st_mtime, UTC).isoformat()
+            overview["last_update_at"] = datetime.fromtimestamp(MAIN_DB_PATH.stat().st_mtime, UTC).astimezone(MSK).isoformat()
         except OSError:
             overview["last_update_at"] = None
 
@@ -597,13 +630,17 @@ def count_main_signals():
         return row["count"] if row else 0
 
 
-def format_market_number(value):
+def format_number(value, decimals=0, scale=1):
     if value is None:
         return None
     try:
-        return round(float(value), 2)
+        number = float(value) / scale
     except (TypeError, ValueError):
         return value
+    text = f"{number:,.{decimals}f}".replace(",", " ")
+    if decimals:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
 def list_main_market(limit=100, offset=0):
@@ -630,11 +667,11 @@ def list_main_market(limit=100, offset=0):
     items = [
         {
             "date": row["trade_date"],
-            "sec_count": row["securities_count"] or row["traded_securities_count"],
-            "total_value": format_market_number(row["total_value"]),
-            "trades": row["total_trades"],
+            "sec_count": format_number(row["securities_count"] or row["traded_securities_count"]),
+            "total_value": format_number(row["total_value"], decimals=2),
+            "trades": format_number(row["total_trades"]),
             "top_ticker": row["top_secid"] or row["top_shortname"],
-            "top_value": format_market_number(row["top_value"]),
+            "top_value": format_number(row["top_value"], decimals=2),
         }
         for row in rows[:limit]
     ]

@@ -102,6 +102,7 @@ function formatDate(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
   return date.toLocaleString('ru-RU', {
+    timeZone: 'Europe/Moscow',
     day: '2-digit',
     month: '2-digit',
     hour: '2-digit',
@@ -115,11 +116,31 @@ function signalTime(item) {
   return Number.isNaN(time) ? 0 : time
 }
 
+function matchesSearchQuery(item, query) {
+  const q = String(query || '').trim().toLowerCase()
+  if (!q) return true
+
+  const haystack = [
+    item?.headline,
+    item?.category,
+    item?.summary,
+    item?.why_now,
+    item?.source_name,
+    ...(Array.isArray(item?.sources) ? item.sources : []),
+    ...(Array.isArray(item?.raw_titles) ? item.raw_titles : []),
+    ...(Array.isArray(item?.source_urls) ? item.source_urls : []),
+    ...(Array.isArray(item?.raw_news_ids) ? item.raw_news_ids : []),
+  ].join(' ').toLowerCase()
+
+  return haystack.includes(q)
+}
+
 function compactDate(value) {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
   return date.toLocaleString('ru-RU', {
+    timeZone: 'Europe/Moscow',
     day: '2-digit',
     month: '2-digit',
     year: '2-digit',
@@ -204,11 +225,16 @@ function updateErrorMessage(error) {
 
 async function copySignalLink(signalId) {
   const url = routeUrl(`/signals/${signalId}`)
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(url)
-    return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url)
+    } else {
+      window.prompt('Ссылка на новость', url)
+    }
+  } catch {
+    window.prompt('Ссылка на новость', url)
   }
-  window.prompt('Ссылка на новость', url)
+  window.dispatchEvent(new CustomEvent('redcat:flash', { detail: 'Ссылка скопирована' }))
 }
 
 function Market({ market }) {
@@ -235,7 +261,7 @@ function Market({ market }) {
   return (
     <div className="page">
       <section className="card page-head">
-        <h1>Полная статистика MOEX</h1>
+        <h1>Статистика MOEX</h1>
       </section>
 
       <div className="card" style={{ marginTop: '20px', overflowX: 'auto', padding: '0' }}>
@@ -245,10 +271,10 @@ function Market({ market }) {
               <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
                 <th style={thStyle}>Дата</th>
                 <th style={thStyle}>ЦБ в листинге</th>
-                <th style={thStyle}>Общий объем (₽)</th>
+                <th style={thStyle}>Общий объем, тыс. ₽</th>
                 <th style={thStyle}>Сделок</th>
                 <th style={thStyle}>Лидер торгов</th>
-                <th style={thStyle}>Объем лидера (₽)</th>
+                <th style={thStyle}>Объем лидера, тыс. ₽</th>
               </tr>
             </thead>
             <tbody>
@@ -303,6 +329,66 @@ const getDomain = (url) => {
     return url;
   }
 };
+
+function sourceLabel(source, fallback = '') {
+  const url = typeof source === 'string' ? source : source?.url
+  const name = typeof source === 'object' ? source?.name : ''
+  const domain = getDomain(url || '')
+  const cleanedName = String(name || fallback || '').replace(/^Telegram:\s*/i, '').trim()
+
+  if (domain === 't.me' || domain.endsWith('.t.me')) {
+    if (cleanedName) return `Tg: ${cleanedName}`
+    try {
+      const parsed = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`)
+      const channel = parsed.pathname.split('/').filter(Boolean)[0]
+      return channel ? `Tg: @${channel}` : 'Tg: Telegram'
+    } catch {
+      return cleanedName ? `Tg: ${cleanedName}` : 'Tg: Telegram'
+    }
+  }
+
+  return domain || cleanedName || 'Источник'
+}
+
+function SourceLinks({ item, compact = false }) {
+  const links = Array.isArray(item.source_links) && item.source_links.length
+    ? item.source_links.filter((source) => source?.url || source?.name)
+    : []
+  const urls = !links.length && Array.isArray(item.source_urls) && item.source_urls.length
+    ? item.source_urls.filter(Boolean)
+    : []
+
+  if (!links.length && !urls.length) {
+    const names = Array.isArray(item.sources) && item.sources.length ? item.sources : [item.source_name].filter(Boolean)
+    return names.length ? (
+      <div className={`source-links ${compact ? 'compact' : ''}`}>
+        {names.map((name) => <span key={name} className="source-link muted-source">{name}</span>)}
+      </div>
+    ) : null
+  }
+
+  const normalizedLinks = links.length
+    ? links
+    : urls.map((url, idx) => ({ url, name: Array.isArray(item.sources) ? item.sources[idx] : item.source_name }))
+
+  return (
+    <div className={`source-links ${compact ? 'compact' : ''}`}>
+      {normalizedLinks.map((source, idx) => (
+        <a
+          key={`${source.url || source.name}-${idx}`}
+          href={source.url || '#'}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="source-link"
+          title={source.name ? `${source.name}: ${source.url}` : source.url}
+        >
+          {sourceLabel(source)}
+        </a>
+      ))}
+    </div>
+  )
+}
+
 export default function App() {
   const [auth, setAuth] = useState(loadAuth())
   const [signals, setSignals] = useState([])
@@ -438,6 +524,12 @@ export default function App() {
     window.__redcatFlashTimer = window.setTimeout(() => setMessage(''), 2500)
   }
 
+  useEffect(() => {
+    const handler = (event) => flash(event.detail || 'Готово')
+    window.addEventListener('redcat:flash', handler)
+    return () => window.removeEventListener('redcat:flash', handler)
+  }, [])
+
   const saveProfile = async (payload) => {
     const data = await apiFetch('/api/me', {
       method: 'PUT',
@@ -518,8 +610,8 @@ export default function App() {
     {/* Открытые страницы */}
     <Route path="/" element={<HomePage signals={signalCardList} overview={overview} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} onRunUpdate={runUpdate} updating={updating} />} />
     <Route path="/about" element={<AboutPage />} />
-    <Route path="/register" element={<RegisterPage onAuth={persistAuth} />} />
-    <Route path="/login" element={<LoginPage onAuth={persistAuth} />} />
+    <Route path="/register" element={auth ? <Navigate to="/account" replace /> : <RegisterPage onAuth={persistAuth} />} />
+    <Route path="/login" element={auth ? <Navigate to="/account" replace /> : <LoginPage onAuth={persistAuth} />} />
 
     {/* Защищенные страницы (только для авторизованных) */}
     <Route path="/cards" element={
@@ -530,11 +622,6 @@ export default function App() {
     <Route path="/offtop-news" element={
       <ProtectedRoute auth={auth}>
         <OfftopNewsPage signals={signalCardList} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} />
-      </ProtectedRoute>
-    } />
-    <Route path="/search" element={
-      <ProtectedRoute auth={auth}>
-        <SearchPage signals={signalCardList} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} />
       </ProtectedRoute>
     } />
     <Route path="/signals/:id" element={
@@ -583,8 +670,7 @@ function TopBar({ auth, onLogout }) {
     ['/', 'Главная'],
     ['/about', 'О проекте'],
     ['/cards', 'FinTech News'],
-    ['/offtop-news', 'Offtop news'],
-    ['/search', 'Поиск'],
+    ['/offtop-news', 'Offtop News'],
     ['/moex', 'MOEX'],
     ['/notifications', 'Уведомления'],
   ]
@@ -672,6 +758,8 @@ function ToastBar({ item, onClose }) {
 }
 
 function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavorite, onRunUpdate, updating }) {
+  const [pyramidItems, setPyramidItems] = useState(null)
+
   const filteredSignals = useMemo(() =>
     signals.filter(s => Number(s.hotness) > 1),
     [signals]
@@ -682,13 +770,38 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
     [filteredSignals],
   )
 
-  const hot5 = sorted.filter((item) => Number(item.hotness) === 5).slice(0, 1)
-  const hot4 = sorted.filter((item) => Number(item.hotness) === 4).slice(0, 2)
-  const hot3 = sorted.filter((item) => Number(item.hotness) === 3).slice(0, 3)
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const [h5, h4, h3] = await Promise.all([
+          apiFetch('/api/signals?limit=1&hotness=5&sort=time_desc'),
+          apiFetch('/api/signals?limit=2&hotness=4&sort=time_desc'),
+          apiFetch('/api/signals?limit=3&hotness=3&sort=time_desc'),
+        ])
+        if (alive) {
+          setPyramidItems({
+            hot5: h5.items || [],
+            hot4: h4.items || [],
+            hot3: h3.items || [],
+          })
+        }
+      } catch {
+        if (alive) setPyramidItems(null)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [signals.length])
+
+  const hot5 = pyramidItems?.hot5 || sorted.filter((item) => Number(item.hotness) === 5).slice(0, 1)
+  const hot4 = pyramidItems?.hot4 || sorted.filter((item) => Number(item.hotness) === 4).slice(0, 2)
+  const hot3 = pyramidItems?.hot3 || sorted.filter((item) => Number(item.hotness) === 3).slice(0, 3)
 
   const counts = {
     observations: overview.observations ?? signals.length,
-    topics: overview.categories ?? new Set(signals.map((item) => item.category).filter(Boolean)).size,
+    processedLastWeek: overview.processed_last_7d ?? 0,
     sources: overview.sources ?? new Set(signals.map((item) => item.source_name).filter(Boolean)).size,
     processedLastDay: overview.processed_last_24h ?? 0,
     lastParsed: compactDate(overview.last_parsed_at),
@@ -704,7 +817,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
           <p>Учебный проект в рамках хакатона АльфаБанка для Лицея НИУ ВШЭ</p>
           <div className="hero-actions">
             <Link to="/cards" className="button primary">Открыть FinTech News</Link>
-            <Link to="/search" className="button ghost">Открыть поиск</Link>
+            <Link to="/offtop-news" className="button ghost">Offtop News</Link>
             <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
               {updating ? 'Запускаю...' : 'Обновить базу'}
             </button>
@@ -715,23 +828,15 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
           <div className="kpi-grid">
             <Kpi label="Наблюдений" value={counts.observations} />
             <Kpi label="Источников" value={counts.sources} />
-            <Kpi label="Категорий" value={counts.topics} />
-            <Kpi label="За сутки" value={counts.processedLastDay} />
+            <Kpi label="Новостей за неделю" value={counts.processedLastWeek} />
+            <Kpi label="Новостей за сутки" value={counts.processedLastDay} />
             <Kpi label="Последний парсинг" value={counts.lastParsed} />
             <Kpi label="Обновление базы" value={counts.lastUpdate} />
           </div>
         </div>
       </section>
 
-      <section className="card">
-        <div className="section-head">
-          <div>
-            <span className="eyebrow">Последние новости</span>
-            <h2>Пирамида hotness</h2>
-          </div>
-          <Link to="/cards" className="button ghost">Все FinTech News</Link>
-        </div>
-
+      <section className="card pyramid-card">
         <div className="latest-layout">
           {hot5.length ? (
             <div className="latest-row one">
@@ -751,6 +856,9 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
             </div>
           ) : null}
         </div>
+        <div className="pyramid-footer">
+          <Link to="/cards" className="button ghost">Все FinTech News</Link>
+        </div>
       </section>
     </div>
   )
@@ -767,107 +875,8 @@ function AboutPage() {
   )
 }
 
-function SearchPage({ signals, favorites = [], auth, onToggleFavorite }) {
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState([])
-  const [hasMore, setHasMore] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-
-  const buildSearchPath = (offset) => {
-    const params = new URLSearchParams({
-      limit: String(PAGE_SIZE),
-      offset: String(offset),
-      sort: 'time_desc',
-      hotness: '2,3,4,5',
-    })
-    if (query.trim()) params.set('q', query.trim())
-    return `/api/signals?${params.toString()}`
-  }
-
-  const loadResults = async (reset = false) => {
-    const offset = reset ? 0 : results.length
-    setLoading(true)
-    setError('')
-    try {
-      const data = await apiFetch(buildSearchPath(offset))
-      const items = data.items || []
-      setResults((prev) => reset ? items : [...prev, ...items])
-      setHasMore(Boolean(data.has_more))
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    let alive = true
-    setLoading(true)
-    setError('')
-    ;(async () => {
-      try {
-        const data = await apiFetch(buildSearchPath(0))
-        if (!alive) return
-        setResults(data.items || [])
-        setHasMore(Boolean(data.has_more))
-      } catch (err) {
-        if (alive) setError(err.message)
-      } finally {
-        if (alive) setLoading(false)
-      }
-    })()
-    return () => {
-      alive = false
-    }
-  }, [query])
-
-  return (
-    <div className="stack">
-      <section className="card search-window">
-        <span className="eyebrow">Поиск</span>
-        <h1>Поиск</h1>
-        <p>Ищет идеальные совпадения</p>
-        <input
-          className="search-input"
-          placeholder="Ищи по теме, источнику, заголовку..."
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-      </section>
-
-      <section className="cards-grid">
-        {error ? (
-          <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
-            <p className="muted">{error}</p>
-          </div>
-        ) : results.length ? results.map((item) => (
-          <SignalCard
-            key={item.id}
-            item={item}
-            auth={auth}
-            onToggleFavorite={onToggleFavorite}
-            favorite={favorites.some((fav) => fav.id === item.id)}
-          />
-        )) : (
-          <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
-            <p className="muted">{loading ? 'Загружаю...' : 'Ничего не найдено'}</p>
-          </div>
-        )}
-      </section>
-
-      {hasMore ? (
-        <div className="load-more-row">
-          <button className="button ghost" onClick={() => loadResults(false)} disabled={loading}>
-            {loading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
-          </button>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavorite }) {
+  const [query, setQuery] = useState('')
   const [sortBy, setSortBy] = useState('hotness')
   const [category, setCategory] = useState([])
   const [source, setSource] = useState([])
@@ -888,6 +897,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     if (source.length) params.set('source', source.join(','))
     if (hotness.length) params.set('hotness', hotness.join(','))
     if (timeRange !== 'all') params.set('time_range', timeRange)
+    if (query.trim()) params.set('q', query.trim())
     return `/api/signals?${params.toString()}`
   }
 
@@ -926,7 +936,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     return () => {
       alive = false
     }
-  }, [sortBy, category, source, hotness, timeRange])
+  }, [sortBy, category, source, hotness, timeRange, query])
 
   const topics = useMemo(() => {
     const values = overview.category_options || signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.category).filter(Boolean)
@@ -947,6 +957,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
       const byCategory = !category.length || category.includes(item.category)
       const bySource = !source.length || source.includes(item.source_name)
       const byHotness = !hotness.length || hotness.includes(String(item.hotness))
+      const byQuery = matchesSearchQuery(item, query)
 
       const published = signalTime(item)
       const byTime =
@@ -955,7 +966,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
         (published > 0 && timeRange === 'week' && now - published <= 7 * 24 * 60 * 60 * 1000) ||
         (published > 0 && timeRange === 'month' && now - published <= 30 * 24 * 60 * 60 * 1000)
 
-      return byCategory && bySource && byHotness && byTime
+      return byCategory && bySource && byHotness && byQuery && byTime
     })
 
     items = [...items].sort((a, b) => {
@@ -971,7 +982,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     })
 
     return items
-  }, [pageSignals, sortBy, category, source, hotness, timeRange])
+  }, [pageSignals, sortBy, category, source, hotness, timeRange, query])
 
   return (
     <div className="stack">
@@ -980,6 +991,12 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
         <span className="eyebrow">FinTech News</span>
         <h1>FinTech News</h1>
         <p>Используйте фильтры ниже для сортировки и поиска по категориям.</p>
+        <input
+          className="search-input"
+          placeholder="Поиск по теме, источнику, заголовку..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
 
         {/* 2. Твой новый красивый тулбар */}
         <div className="cards-toolbar">
@@ -1072,6 +1089,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
 }
 
 function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
+  const [query, setQuery] = useState('')
   const [items, setItems] = useState([])
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -1082,7 +1100,14 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
     setLoading(true)
     setError('')
     try {
-      const data = await apiFetch(`/api/signals?limit=${PAGE_SIZE}&offset=${offset}&hotness=1&sort=time_desc`)
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(offset),
+        hotness: '1',
+        sort: 'time_desc',
+      })
+      if (query.trim()) params.set('q', query.trim())
+      const data = await apiFetch(`/api/signals?${params.toString()}`)
       const nextItems = data.items || []
       setItems((prev) => reset ? nextItems : [...prev, ...nextItems])
       setHasMore(Boolean(data.has_more))
@@ -1095,23 +1120,34 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
 
   useEffect(() => {
     loadOfftop(true)
-  }, [])
+  }, [query])
+
+  const visibleItems = useMemo(
+    () => items.filter((item) => matchesSearchQuery(item, query)),
+    [items, query],
+  )
 
   return (
     <div className="stack">
       <section className="card page-head">
-        <span className="eyebrow">Offtop news</span>
-        <h1>Offtop</h1>
+        <span className="eyebrow">Offtop News</span>
+        <h1>Offtop News</h1>
         <p>Эти карточки убраны из общей вкладки и показываются здесь отдельно.</p>
+        <input
+          className="search-input"
+          placeholder="Поиск по offtop-новостям..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
       </section>
 
       {error ? (
         <section className="card center-card">
           <p className="muted">{error}</p>
         </section>
-      ) : items.length ? (
+      ) : visibleItems.length ? (
         <section className="cards-grid">
-          {items.map((item) => (
+          {visibleItems.map((item) => (
             <SignalCard
               key={item.id}
               item={item}
@@ -1184,8 +1220,8 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
   if (!item) return <div className="card">{error || 'Карточка не найдена'}</div>;
 
   const sourceUrls = Array.isArray(item.source_urls) && item.source_urls.length
-    ? item.source_urls.slice(0, 3)
-    : [item.url];
+    ? item.source_urls.filter(Boolean)
+    : [item.url].filter(Boolean);
   const favorite = favorites.some((fav) => fav.id === item.id)
 
   return (
@@ -1203,9 +1239,9 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
             Открыть в новой вкладке
           </button>
           <button className="button icon-button ghost" title="Скопировать ссылку" onClick={() => copySignalLink(item.id)}>
-            ↗
+            ⧉
           </button>
-          <button className="button icon-button primary" onClick={() => onToggleFavorite(item.id)}>
+          <button className="button icon-button primary favorite-button" onClick={() => onToggleFavorite(item.id)}>
             {favorite ? '★' : '☆'}
           </button>
         </div>
@@ -1214,34 +1250,13 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
       <div className="detail-grid">
         <InfoCard title="Кратко" text={item.summary} />
         <InfoCard title="Актуальность" text={item.why_now} />
-        <InfoCard title="Draft" text={item.draft} />
         <InfoCard title="Hotness" text={String(item.hotness)} />
 
-        {/* Добавляем блок кликабельных источников (Пункт 5) */}
-        <div className="info-card">
+        <div className="info-card sources-card">
           <h3>Источники</h3>
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
-            {sourceUrls.filter(Boolean).map((url, idx) => (
-              <a
-                key={idx}
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mini-pill"
-                style={{ textDecoration: 'none', color: 'var(--primary)', border: '1px solid var(--primary)' }}
-              >
-                {getDomain(url)}
-              </a>
-            ))}
-          </div>
+          <p className="muted source-hint">Кликабельные ссылки на исходные публикации</p>
+          <SourceLinks item={{ ...item, source_urls: sourceUrls }} />
         </div>
-      </div>
-
-      <div className="meta-row">
-        {/* Здесь можно оставить теги/метки, если они приходят отдельно */}
-        {(item.sources || []).map((source) => (
-          <span key={source} className="mini-pill">{source}</span>
-        ))}
       </div>
     </section>
   )
@@ -1272,18 +1287,14 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
       {!offtop && item.summary ? <p>{item.summary}</p> : null}
       {!offtop && item.why_now ? <p><b>Актуальность:</b> {item.why_now}</p> : null}
 
-      {!offtop ? <div className="meta-row">
-        {(item.sources || []).map((source) => (
-          <span key={source} className="mini-pill">{source}</span>
-        ))}
-      </div> : null}
+      {!offtop ? <SourceLinks item={item} compact /> : null}
 
       <div className="signal-actions">
         <button className="button ghost" onClick={openInNewTab}>Открыть</button>
         <button className="button icon-button ghost" title="Скопировать ссылку" onClick={() => copySignalLink(item.id)}>
-          ↗
+          ⧉
         </button>
-        <button className="button icon-button primary" title={favorite ? 'Убрать из избранного' : 'В избранное'} onClick={() => onToggleFavorite?.(item.id)}>
+        <button className="button icon-button primary favorite-button" title={favorite ? 'Убрать из избранного' : 'В избранное'} onClick={() => onToggleFavorite?.(item.id)}>
           {favorite ? '★' : '☆'}
         </button>
       </div>
@@ -1309,8 +1320,7 @@ function SavedPage({ auth, favorites, onToggleFavorite }) {
     <div className="stack">
       <section className="card page-head">
         <span className="eyebrow">Сохранённые</span>
-        <h1>Избранные карточки</h1>
-        <p>Сюда складываются сигналы, которые пользователь сохранил.</p>
+        <h1>Избранные новости</h1>
       </section>
 
       <section className="cards-grid">
