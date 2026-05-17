@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 const API = import.meta.env.VITE_API_URL ?? ''
 const PAGE_SIZE = 50
@@ -14,31 +14,52 @@ function loadAuth() {
 }
 function CustomSelect({ value, onChange, options }) {
   const [isOpen, setIsOpen] = React.useState(false);
+  const [search, setSearch] = React.useState('');
   const selectedLabel = options.find(o => String(o.value) === String(value))?.label || value;
+  const filteredOptions = options.filter((opt) =>
+    String(opt.label || opt.value || '').toLowerCase().includes(search.trim().toLowerCase())
+  )
+
+  const toggleOpen = () => {
+    setIsOpen((current) => {
+      if (!current) setSearch('')
+      return !current
+    })
+  }
 
   return (
     <div className="custom-select">
-      <div className="select-trigger" onClick={() => setIsOpen(!isOpen)}>
+      <div className="select-trigger" onClick={toggleOpen}>
         {selectedLabel}
       </div>
 
       {isOpen && (
         <>
-          {/* Прозрачная подложка, чтобы закрыть список при клике в любое место */}
-<div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setIsOpen(false)} />
+          <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setIsOpen(false)} />
           <div className="select-options">
-            {options.map((opt) => (
-              <div
-                key={opt.value}
-                className={`select-option ${value === opt.value ? 'active' : ''}`}
-                onClick={() => {
-                  onChange(opt.value);
-                  setIsOpen(false);
-                }}
-              >
-                {opt.label}
-              </div>
-            ))}
+            <input
+              className="select-search"
+              placeholder="Поиск"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+            />
+            <div className="select-options-list">
+              {filteredOptions.length ? filteredOptions.map((opt) => (
+                <div
+                  key={opt.value}
+                  className={`select-option ${value === opt.value ? 'active' : ''}`}
+                  onClick={() => {
+                    onChange(opt.value);
+                    setIsOpen(false);
+                  }}
+                >
+                  {opt.label}
+                </div>
+              )) : (
+                <div className="select-empty">Ничего не найдено</div>
+              )}
+            </div>
           </div>
         </>
       )}
@@ -48,11 +69,22 @@ function CustomSelect({ value, onChange, options }) {
 
 function MultiSelect({ values, onChange, options, placeholder }) {
   const [isOpen, setIsOpen] = React.useState(false)
+  const [search, setSearch] = React.useState('')
   const selected = Array.isArray(values) ? values : []
   const selectedLabels = options
     .filter((option) => selected.includes(String(option.value)))
     .map((option) => option.label)
   const label = selectedLabels.length ? selectedLabels.join(', ') : placeholder
+  const filteredOptions = options.filter((opt) =>
+    String(opt.label || opt.value || '').toLowerCase().includes(search.trim().toLowerCase())
+  )
+
+  const toggleOpen = () => {
+    setIsOpen((current) => {
+      if (!current) setSearch('')
+      return !current
+    })
+  }
 
   const toggleValue = (value) => {
     const text = String(value)
@@ -63,7 +95,7 @@ function MultiSelect({ values, onChange, options, placeholder }) {
 
   return (
     <div className="custom-select multi-select">
-      <div className="select-trigger" onClick={() => setIsOpen(!isOpen)}>
+      <div className="select-trigger" onClick={toggleOpen}>
         {label}
       </div>
 
@@ -71,21 +103,32 @@ function MultiSelect({ values, onChange, options, placeholder }) {
         <>
           <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setIsOpen(false)} />
           <div className="select-options">
-            <div
-              className={`select-option ${selected.length === 0 ? 'active' : ''}`}
-              onClick={() => onChange([])}
-            >
-              {placeholder}
-            </div>
-            {options.map((opt) => (
+            <input
+              className="select-search"
+              placeholder="Поиск"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+            />
+            <div className="select-options-list">
               <div
-                key={opt.value}
-                className={`select-option ${selected.includes(String(opt.value)) ? 'active' : ''}`}
-                onClick={() => toggleValue(opt.value)}
+                className={`select-option ${selected.length === 0 ? 'active' : ''}`}
+                onClick={() => onChange([])}
               >
-                {opt.label}
+                {placeholder}
               </div>
-            ))}
+              {filteredOptions.length ? filteredOptions.map((opt) => (
+                <div
+                  key={opt.value}
+                  className={`select-option ${selected.includes(String(opt.value)) ? 'active' : ''}`}
+                  onClick={() => toggleValue(opt.value)}
+                >
+                  {opt.label}
+                </div>
+              )) : (
+                <div className="select-empty">Ничего не найдено</div>
+              )}
+            </div>
           </div>
         </>
       )}
@@ -95,6 +138,11 @@ function MultiSelect({ values, onChange, options, placeholder }) {
 
 function routeUrl(path) {
   return `${window.location.origin}${window.location.pathname}#${path}`
+}
+
+function openExternalTab(url) {
+  const opened = window.open(url, '_blank')
+  if (opened) opened.opener = null
 }
 
 function formatDate(value) {
@@ -176,7 +224,10 @@ async function apiFetch(path, options = {}, token = '') {
   }
 
   if (!response.ok) {
-    throw new Error(data.error || data.message || data.update?.message || 'Что-то пошло не так')
+    const error = new Error(data.error || data.message || data.update?.message || 'Что-то пошло не так')
+    error.data = data
+    error.status = response.status
+    throw error
   }
 
   return data
@@ -278,7 +329,7 @@ function Market({ market }) {
       {hasMore ? (
         <div className="load-more-row">
           <button className="button ghost" onClick={loadMore} disabled={loading}>
-            {loading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
+            {loading ? 'Загрузка...' : `Загрузить ещё ${PAGE_SIZE}`}
           </button>
         </div>
       ) : null}
@@ -362,6 +413,7 @@ function SourceLinks({ item, compact = false }) {
           rel="noopener noreferrer"
           className="source-link"
           title={source.name ? `${source.name}: ${source.url}` : source.url}
+          onClick={(event) => event.stopPropagation()}
         >
           {sourceLabel(source)}
         </a>
@@ -382,6 +434,7 @@ export default function App() {
   const [promos, setPromos] = useState([])
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
+  const [messageClosing, setMessageClosing] = useState(false)
   const [toast, setToast] = useState(null)
   const [updating, setUpdating] = useState(false)
 
@@ -500,9 +553,15 @@ export default function App() {
   }, [notifications, toast])
 
   const flash = (text) => {
+    setMessageClosing(false)
     setMessage(text)
     window.clearTimeout(window.__redcatFlashTimer)
-    window.__redcatFlashTimer = window.setTimeout(() => setMessage(''), 2500)
+    window.clearTimeout(window.__redcatFlashCloseTimer)
+    window.__redcatFlashTimer = window.setTimeout(() => setMessageClosing(true), 2300)
+    window.__redcatFlashCloseTimer = window.setTimeout(() => {
+      setMessage('')
+      setMessageClosing(false)
+    }, 2700)
   }
 
   useEffect(() => {
@@ -570,7 +629,7 @@ export default function App() {
         <TopBar auth={auth} onLogout={logout} />
         <main className="page-wrap">
           <div className="card center-card">
-            <h2>Загружаю проект</h2>
+            <h2>Загружаем данные</h2>
             <p>Подтягиваю сигналы, MOEX и настройки из базы.</p>
           </div>
         </main>
@@ -584,15 +643,17 @@ export default function App() {
 
       <TopBar auth={auth} onLogout={logout} />
 
-      {message ? <div className="top-message">{message}</div> : null}
+      {message ? <div className={`top-message ${messageClosing ? 'closing' : ''}`}>{message}</div> : null}
 
      <main className="page-wrap">
   <Routes>
     {/* Открытые страницы */}
     <Route path="/" element={<HomePage signals={signalCardList} overview={overview} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} onRunUpdate={runUpdate} updating={updating} />} />
     <Route path="/about" element={<AboutPage />} />
+    <Route path="/digests" element={<DigestsPage />} />
     <Route path="/register" element={auth ? <Navigate to="/account" replace /> : <RegisterPage onAuth={persistAuth} />} />
     <Route path="/login" element={auth ? <Navigate to="/account" replace /> : <LoginPage onAuth={persistAuth} />} />
+    <Route path="/activate" element={auth ? <Navigate to="/account" replace /> : <ActivationPage onAuth={persistAuth} />} />
 
     {/* Защищенные страницы (только для авторизованных) */}
     <Route path="/cards" element={
@@ -615,7 +676,7 @@ export default function App() {
     } />
     <Route path="/notifications" element={
       <ProtectedRoute auth={auth}>
-        <NotificationsPage auth={auth} signals={signalCardList} notifications={notifications} settings={settings} onSaveSettings={saveNotificationSettings} onClear={clearNotifications} />
+        <NotificationsPage auth={auth} overview={overview} notifications={notifications} settings={settings} onSaveSettings={saveNotificationSettings} onClear={clearNotifications} />
       </ProtectedRoute>
     } />
     <Route path="/saved" element={
@@ -650,6 +711,7 @@ function TopBar({ auth, onLogout }) {
   const links = [
     ['/', 'Главная'],
     ['/about', 'О проекте'],
+    ['/digests', 'Дайджесты'],
     ['/cards', 'FinTech News'],
     ['/offtop-news', 'Offtop News'],
     ['/moex', 'MOEX'],
@@ -794,7 +856,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
       <section className="hero card">
         <div className="hero-copy">
           <h1>Опережай тренды. Управляй будущим.</h1>
-          <p>Учебный проект в рамках хакатона АльфаБанка для Лицея НИУ ВШЭ</p>
+          <p>Сервис мониторит финтех-новости, банковский рынок и регуляторные изменения, превращая поток публикаций в понятные аналитические карточки.</p>
           <div className="hero-actions">
             <Link to="/cards" className="button primary">Открыть FinTech News</Link>
             <Link to="/offtop-news" className="button ghost">Offtop News</Link>
@@ -807,7 +869,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
         <div className="hero-panel">
           <div className="kpi-grid">
             <Kpi label="Наблюдений" value={counts.observations} />
-            <Kpi label="Источников" value={counts.sources} />
+            <Kpi label="Источника" value={counts.sources} />
             <Kpi label="Новостей за неделю" value={counts.processedLastWeek} />
             <Kpi label="Новостей за сутки" value={counts.processedLastDay} />
             <Kpi label="Последний парсинг" value={counts.lastParsed} />
@@ -847,8 +909,22 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
 function AboutPage() {
   return (
     <div className="stack">
-      <section className="card page-head">
-        <h1>Скоро разместим информацию.</h1>
+      <section className="card page-head placeholder-page">
+        <h1>Данная страница еще в разработке</h1>
+        <p>Скоро здесь появится описание проекта, команды и материалов.</p>
+        <img className="placeholder-cat" src="/working-cat.png" alt="Страница в разработке" />
+      </section>
+    </div>
+  )
+}
+
+function DigestsPage() {
+  return (
+    <div className="stack">
+      <section className="card page-head placeholder-page">
+        <h1>Данная страница еще в разработке</h1>
+        <p>В будущем здесь будет располагаться краткая еженедельная сводка.</p>
+        <img className="placeholder-cat" src="/working-cat.png" alt="Дайджесты в разработке" />
       </section>
     </div>
   )
@@ -1031,7 +1107,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
           ))
         ) : (
           <div className="card center-card" style={{ gridColumn: '1 / -1' }}>
-            <p className="muted">{cardsLoading ? 'Загружаю карточки...' : 'Ничего не найдено по вашим фильтрам'}</p>
+            <p className="muted">{cardsLoading ? 'Пожалуйста подождите, данные загружаются.' : 'По выбранным фильтрам ничего не найдено.'}</p>
           </div>
         )}
       </section>
@@ -1039,7 +1115,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
       {hasMore ? (
         <div className="load-more-row">
           <button className="button ghost" onClick={() => loadCards(false)} disabled={cardsLoading}>
-            {cardsLoading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
+            {cardsLoading ? 'Загрузка...' : `Загрузить ещё ${PAGE_SIZE}`}
           </button>
         </div>
       ) : null}
@@ -1095,7 +1171,7 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
     <div className="stack">
       <section className="card page-head">
         <h1>Offtop News</h1>
-        <p>Эти карточки убраны из общей вкладки и показываются здесь отдельно.</p>
+        <p>Карточки, которые не попали в основную ленту, потому что не несут значительной ценности.</p>
         <form className="search-form" onSubmit={submitSearch}>
           <input
             className="search-input"
@@ -1128,15 +1204,14 @@ function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
         </section>
       ) : (
         <section className="card center-card">
-          <h2>{loading ? 'Загружаю...' : 'Пока нет offtop-новостей'}</h2>
-          <p>Когда такие карточки появятся, они будут отображаться здесь.</p>
+          <p className="muted">{loading ? 'Пожалуйста подождите, данные загружаются.' : 'По выбранным фильтрам ничего не найдено.'}</p>
         </section>
       )}
 
       {hasMore ? (
         <div className="load-more-row">
           <button className="button ghost" onClick={() => loadOfftop(false)} disabled={loading}>
-            {loading ? 'Загружаю...' : `Загрузить ещё ${PAGE_SIZE}`}
+            {loading ? 'Загрузка...' : `Загрузить ещё ${PAGE_SIZE}`}
           </button>
         </div>
       ) : null}
@@ -1184,7 +1259,7 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
 
   const item = cachedItem || remoteItem;
 
-  if (loading) return <div className="card">Загружаю карточку...</div>;
+  if (loading) return <div className="card center-card"><p className="muted">Пожалуйста подождите, данные загружаются.</p></div>;
   if (!item) return <div className="card">{error || 'Карточка не найдена'}</div>;
 
   const sourceUrls = Array.isArray(item.source_urls) && item.source_urls.length
@@ -1196,16 +1271,13 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
     <section className="card detail-card">
       <div className="detail-head">
         <div>
-          <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span>
+          <div className="detail-tags">
+            <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span>
+            <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span>
+          </div>
           <h1>{item.headline}</h1>
-          <p>
-            {formatDate(item.published_at || item.created_at)} · {sourceUrls.map(url => getDomain(url)).join(', ')}
-          </p>
         </div>
         <div className="detail-buttons">
-          <button className="button ghost" onClick={() => window.open(routeUrl(`/signals/${item.id}`), '_blank', 'noopener,noreferrer')}>
-            Открыть в новой вкладке
-          </button>
           <button className="button icon-button ghost" title="Скопировать ссылку" onClick={() => copySignalLink(item.id)}>
             ⧉
           </button>
@@ -1218,11 +1290,10 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
       <div className="detail-grid">
         <InfoCard title="Кратко" text={item.summary} />
         <InfoCard title="Актуальность" text={item.why_now} />
-        <InfoCard title="Hotness" text={String(item.hotness)} />
 
         <div className="info-card sources-card">
           <h3>Источники</h3>
-          <p className="muted source-hint">Кликабельные ссылки на исходные публикации</p>
+          <p className="muted source-hint">{formatDate(item.published_at || item.created_at)}</p>
           <SourceLinks item={{ ...item, source_urls: sourceUrls }} />
         </div>
       </div>
@@ -1232,17 +1303,32 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
 
 function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 'default', offtop = false }) {
   const published = item.published_at || item.created_at
+  const navigate = useNavigate()
 
-  const openInNewTab = () => {
+  const openCard = () => {
     if (offtop && item.url) {
-      window.open(item.url, '_blank', 'noopener,noreferrer')
+      openExternalTab(item.url)
       return
     }
-    window.open(routeUrl(`/signals/${item.id}`), '_blank', 'noopener,noreferrer')
+    navigate(`/signals/${item.id}`)
+  }
+
+  const openFromKeyboard = (event) => {
+    if (event.target?.closest?.('button, a')) return
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      openCard()
+    }
   }
 
   return (
-    <article className={`signal-card variant-${variant} ${offtop ? 'is-offtop' : ''}`}>
+    <article
+      className={`signal-card variant-${variant} ${offtop ? 'is-offtop' : ''}`}
+      onClick={openCard}
+      onKeyDown={openFromKeyboard}
+      role="button"
+      tabIndex={0}
+    >
       <div className="signal-top">
         <div className="signal-headline">
           {!offtop ? <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span> : null}
@@ -1253,20 +1339,18 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
 
       {!offtop ? <div className="signal-meta">
         <span>{formatDate(published)}</span>
-        <span>{item.source_name}</span>
       </div> : null}
 
       {!offtop && item.summary ? <p>{item.summary}</p> : null}
-      {!offtop && item.why_now ? <p><b>Актуальность:</b> {item.why_now}</p> : null}
+      {!offtop && variant !== 'small' && item.why_now ? <p><b>Актуальность:</b> {item.why_now}</p> : null}
 
       {!offtop ? <SourceLinks item={item} compact /> : null}
 
       <div className="signal-actions">
-        <button className="button ghost" onClick={openInNewTab}>Открыть</button>
-        <button className="button icon-button ghost" title="Скопировать ссылку" onClick={() => copySignalLink(item.id)}>
+        <button className="button icon-button ghost" title="Скопировать ссылку" onClick={(event) => { event.stopPropagation(); copySignalLink(item.id) }}>
           ⧉
         </button>
-        <button className="button icon-button primary favorite-button" title={favorite ? 'Убрать из избранного' : 'В избранное'} onClick={() => onToggleFavorite?.(item.id)}>
+        <button className="button icon-button primary favorite-button" title={favorite ? 'Убрать из избранного' : 'В избранное'} onClick={(event) => { event.stopPropagation(); onToggleFavorite?.(item.id) }}>
           {favorite ? '★' : '☆'}
         </button>
       </div>
@@ -1308,42 +1392,39 @@ function SavedPage({ auth, favorites, onToggleFavorite }) {
   )
 }
 
-function NotificationsPage({ auth, signals, notifications, settings, onSaveSettings, onClear }) {
+function NotificationsPage({ auth, overview = {}, notifications, settings, onSaveSettings, onClear }) {
   const [rules, setRules] = useState(settings.length ? settings : [{ theme: '', source_name: '', hotness_min: '' }])
+  const [notice, setNotice] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [clearing, setClearing] = useState(false)
 
   useEffect(() => {
     setRules(settings.length ? settings : [{ theme: '', source_name: '', hotness_min: '' }])
   }, [settings])
 
   const topicOptions = useMemo(() => {
-    const values = new Set()
-    ;(signals || []).forEach((item) => {
-      if (item.category) values.add(item.category)
-    })
+    const values = new Set(overview.category_options || [])
     ;(rules || []).forEach((rule) => {
       if (rule.theme) values.add(rule.theme)
     })
-    return [{ value: '', label: 'Любая тема' }, ...[...values].sort().map((value) => ({ value, label: value }))]
-  }, [signals, rules])
+    return [{ value: '', label: 'Любая категория' }, ...[...values].map((value) => ({ value, label: value }))]
+  }, [rules, overview.category_options])
 
   const sourceOptions = useMemo(() => {
-    const values = new Set()
-    ;(signals || []).forEach((item) => {
-      if (item.source_name) values.add(item.source_name)
-    })
+    const values = new Set(overview.source_options || [])
     ;(rules || []).forEach((rule) => {
       if (rule.source_name) values.add(rule.source_name)
     })
     return [{ value: '', label: 'Любой источник' }, ...[...values].sort().map((value) => ({ value, label: value }))]
-  }, [signals, rules])
+  }, [rules, overview.source_options])
 
   const hotnessOptions = [
     { value: '', label: 'Любой hotness' },
-    { value: '5', label: 'от 5' },
-    { value: '4', label: 'от 4' },
-    { value: '3', label: 'от 3' },
-    { value: '2', label: 'от 2' },
-    { value: '1', label: 'от 1' }
+    { value: '5', label: 'Hotness от 5' },
+    { value: '4', label: 'Hotness от 4' },
+    { value: '3', label: 'Hotness от 3' },
+    { value: '2', label: 'Hotness от 2' },
+    { value: '1', label: 'Hotness от 1' }
   ];
 
   const addRule = () => {
@@ -1355,7 +1436,10 @@ function NotificationsPage({ auth, signals, notifications, settings, onSaveSetti
   }
 
   const removeRule = (index) => {
-    setRules((prev) => prev.filter((_, i) => i !== index))
+    setRules((prev) => {
+      const next = prev.filter((_, i) => i !== index)
+      return next.length ? next : [{ theme: '', source_name: '', hotness_min: '' }]
+    })
   }
 
   const saveRules = async () => {
@@ -1367,12 +1451,34 @@ function NotificationsPage({ auth, signals, notifications, settings, onSaveSetti
       }))
       .filter((rule) => rule.theme || rule.source_name || rule.hotness_min !== '')
 
-    await onSaveSettings(clean)
+    setSaving(true)
+    setNotice('')
+    try {
+      await onSaveSettings(clean)
+      setNotice(clean.length ? 'Правила уведомлений сохранены.' : 'Правила очищены. Будут приходить все новые сигналы.')
+    } catch (error) {
+      setNotice(error.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const clearAllNotifications = async () => {
+    setClearing(true)
+    setNotice('')
+    try {
+      await onClear()
+      setNotice('Лента уведомлений очищена.')
+    } catch (error) {
+      setNotice(error.message)
+    } finally {
+      setClearing(false)
+    }
   }
 
   const openNotification = (item) => {
     if (item.signal_id) {
-      window.open(routeUrl(`/signals/${item.signal_id}`), '_blank', 'noopener,noreferrer')
+      openExternalTab(routeUrl(`/signals/${item.signal_id}`))
     }
   }
 
@@ -1388,59 +1494,94 @@ function NotificationsPage({ auth, signals, notifications, settings, onSaveSetti
   return (
     <div className="stack">
       <section className="card page-head">
-        <h1>Настройки уведомлений</h1>
-        <p>Можно создать несколько независимых правил. Они не мешают друг другу.</p>
-        <div className="hero-actions">
-          <button className="button ghost" onClick={onClear}>Очистить уведомления</button>
+        <h1>Уведомления</h1>
+        <p>Настройте, какие новости попадут в вашу ленту. Условия внутри одного правила работают вместе.</p>
+        <div className="notification-stats">
+          <div className="mini-stat">Правил: {settings.length}</div>
+          <div className="mini-stat">Уведомлений: {notifications.length}</div>
         </div>
       </section>
 
-      <section className="card">
+      <section className="card notification-settings-card">
         <div className="section-head">
           <div>
-            <h2>Тема, источник и hotness</h2>
+            <h2>Правила отбора</h2>
+            <p className="muted">Оставьте поле пустым, если по нему не нужно ограничение.</p>
           </div>
           <button className="button ghost" onClick={addRule}>Добавить правило</button>
         </div>
 
         <div className="rules-list">
           {rules.map((rule, index) => (
-            <div className="rule-row" key={index}>
-              <CustomSelect
-                value={rule.theme}
-                options={topicOptions}
-                onChange={(val) => updateRule(index, { theme: val })}
-              />
+            <div className="notification-rule-card" key={index}>
+              <div className="rule-card-head">
+                <span>Правило {index + 1}</span>
+                <button className="button ghost" onClick={() => removeRule(index)}>Удалить</button>
+              </div>
 
-              <CustomSelect
-                value={rule.source_name}
-                options={sourceOptions}
-                onChange={(val) => updateRule(index, { source_name: val })}
-              />
+              <label className="field">
+                <span>Категория</span>
+                <CustomSelect
+                  value={rule.theme}
+                  options={topicOptions}
+                  onChange={(val) => updateRule(index, { theme: val })}
+                />
+              </label>
 
-              <CustomSelect
-                value={rule.hotness_min}
-                options={hotnessOptions}
-                onChange={(val) => updateRule(index, { hotness_min: val })}
-              />
+              <label className="field">
+                <span>Источник</span>
+                <CustomSelect
+                  value={rule.source_name}
+                  options={sourceOptions}
+                  onChange={(val) => updateRule(index, { source_name: val })}
+                />
+              </label>
 
-              <button className="button ghost" onClick={() => removeRule(index)}>Удалить</button>
+              <label className="field">
+                <span>Минимальная важность</span>
+                <CustomSelect
+                  value={rule.hotness_min}
+                  options={hotnessOptions}
+                  onChange={(val) => updateRule(index, { hotness_min: val })}
+                />
+              </label>
             </div>
           ))}
         </div>
 
-        <div className="hero-actions" style={{ marginTop: '20px' }}>
-          <button className="button primary" onClick={saveRules}>Сохранить правила</button>
+        <div className="notification-actions">
+          <button className="button primary" onClick={saveRules} disabled={saving}>
+            {saving ? 'Сохраняю...' : 'Сохранить правила'}
+          </button>
+          {notice ? <div className="flash">{notice}</div> : null}
         </div>
       </section>
 
-      <section className="cards-grid">
-        {notifications.map((item) => (
-          <button key={item.id} className="notification-card" onClick={() => openNotification(item)}>
-            <div className="notification-title">{item.title}</div>
-            <div className="notification-subtitle">{formatDate(item.created_at)}</div>
+      <section className="card notification-feed-card">
+        <div className="section-head">
+          <div>
+            <h2>Лента уведомлений</h2>
+            <p className="muted">Новые совпадения по вашим правилам.</p>
+          </div>
+          <button className="button ghost" onClick={clearAllNotifications} disabled={clearing || !notifications.length}>
+            {clearing ? 'Очищаю...' : 'Очистить'}
           </button>
-        ))}
+        </div>
+
+        {notifications.length ? (
+          <div className="notification-list">
+            {notifications.map((item) => (
+              <button key={item.id} className="notification-card" onClick={() => openNotification(item)}>
+                <div className="notification-title">{item.title}</div>
+                <div className="notification-subtitle">{formatDate(item.created_at)}</div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <p className="muted">Пока нет новых уведомлений.</p>
+          </div>
+        )}
       </section>
     </div>
   )
@@ -1548,7 +1689,6 @@ function RegisterPage({ onAuth }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [promoCode, setPromoCode] = useState('')
-  const [paid, setPaid] = useState(false)
   const [notice, setNotice] = useState('')
   const navigate = useNavigate()
 
@@ -1565,15 +1705,15 @@ function RegisterPage({ onAuth }) {
       })
       setEmail(data.user.email)
       setStep(2)
-      setNotice('Пользователь создан. Теперь оплати или введи промокод.')
+      setNotice('Аккаунт создан. Введите код активации.')
     } catch (error) {
+      if (error.data?.requires_activation) {
+        const activationEmail = encodeURIComponent(error.data.email || email)
+        navigate(`/activate?email=${activationEmail}`)
+        return
+      }
       setNotice(error.message)
     }
-  }
-
-  const openPay = () => {
-    setPaid(true)
-    setNotice('Оплата отмечена для демо-доступа.')
   }
 
   const activate = async (e) => {
@@ -1584,21 +1724,20 @@ function RegisterPage({ onAuth }) {
         body: JSON.stringify({
           email,
           promo_code: promoCode,
-          payment_success: paid,
         }),
       })
       onAuth(data)
       navigate('/account')
     } catch (error) {
-      setNotice(error.message)
+      setNotice(error.data?.requires_activation ? 'Аккаунт нужно активировать. Перейдите в регистрацию и введите код активации.' : error.message)
     }
   }
 
   return (
     <div className="stack">
       <section className="card page-head">
-        <h1>Сначала ФИО, почта, пароль</h1>
-        <p>Потом уже активация через оплату или промокод.</p>
+        <h1>Регистрация аккаунта</h1>
+        <p>После регистрации нужно активировать аккаунт кодом доступа.</p>
       </section>
 
       <section className="card form-card">
@@ -1622,18 +1761,67 @@ function RegisterPage({ onAuth }) {
           <form className="form-grid" onSubmit={activate}>
             <div className="flash">Почта для активации: {email}</div>
             <label className="field">
-              <span>Промокод</span>
+              <span>Введите код активации</span>
               <input value={promoCode} onChange={(e) => setPromoCode(e.target.value)} />
             </label>
-            <button className="button ghost full" type="button" onClick={openPay}>
-              Оплатить
-            </button>
             <button className="button primary full" type="submit">
               Активировать
             </button>
           </form>
         )}
 
+        {notice ? <div className="flash">{notice}</div> : null}
+      </section>
+    </div>
+  )
+}
+
+function ActivationPage({ onAuth }) {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const params = new URLSearchParams(location.search)
+  const [email, setEmail] = useState(params.get('email') || '')
+  const [promoCode, setPromoCode] = useState('')
+  const [notice, setNotice] = useState('Аккаунт нужно активировать.')
+
+  const activate = async (event) => {
+    event.preventDefault()
+    try {
+      const data = await apiFetch('/api/activate', {
+        method: 'POST',
+        body: JSON.stringify({
+          email,
+          promo_code: promoCode,
+        }),
+      })
+      onAuth(data)
+      navigate('/account')
+    } catch (error) {
+      setNotice(error.message)
+    }
+  }
+
+  return (
+    <div className="stack">
+      <section className="card page-head">
+        <h1>Активация аккаунта</h1>
+        <p>Введите код активации, чтобы открыть доступ к сервису.</p>
+      </section>
+
+      <section className="card form-card">
+        <form className="form-grid" onSubmit={activate}>
+          <label className="field">
+            <span>Почта</span>
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+          </label>
+          <label className="field">
+            <span>Введите код активации</span>
+            <input value={promoCode} onChange={(event) => setPromoCode(event.target.value)} />
+          </label>
+          <button className="button primary full" type="submit">
+            Активировать
+          </button>
+        </form>
         {notice ? <div className="flash">{notice}</div> : null}
       </section>
     </div>
@@ -1656,28 +1844,35 @@ function LoginPage({ onAuth }) {
       onAuth(data)
       navigate('/account')
     } catch (error) {
+      if (error.data?.requires_activation) {
+        const activationEmail = encodeURIComponent(error.data.email || email)
+        navigate(`/activate?email=${activationEmail}`)
+        return
+      }
       setNotice(error.message)
     }
   }
 
   return (
-    <section className="card form-card">
-      <div>
-        <h1>Войти в аккаунт</h1>
-      </div>
-      <form className="form-grid" onSubmit={login}>
-        <label className="field">
-          <span>Почта</span>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>Пароль</span>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-        </label>
-        <button className="button primary full" type="submit">Войти</button>
-      </form>
-      {notice ? <div className="flash">{notice}</div> : null}
-    </section>
+    <div className="stack">
+      <section className="card form-card">
+        <div>
+          <h1>Войти в аккаунт</h1>
+        </div>
+        <form className="form-grid" onSubmit={login}>
+          <label className="field">
+            <span>Почта</span>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Пароль</span>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+          <button className="button primary full" type="submit">Войти</button>
+        </form>
+        {notice ? <div className="flash">{notice}</div> : null}
+      </section>
+    </div>
   )
 }
 

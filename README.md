@@ -6,7 +6,7 @@
 
 **Promo codes:** REDCAT2026
 
-- manager@redcat.tu
+- manager@redcat.ru
 - rqbqerj1543tgjkq
 
 ## Быстрый Запуск

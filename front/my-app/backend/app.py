@@ -28,6 +28,20 @@ UPDATE_API_URL = os.getenv("UPDATE_API_URL", "http://127.0.0.1:5000/update")
 UPDATE_STATUS_URL = os.getenv("UPDATE_STATUS_URL", "http://127.0.0.1:5000/update/status")
 MAX_API_LIMIT = 10000
 MSK = timezone(timedelta(hours=3))
+CANONICAL_SIGNAL_CATEGORIES = (
+    "Регулирование и комплаенс",
+    "Платежи и инфраструктура",
+    "Антифрод и кибербезопасность",
+    "Банковские продукты и клиентский опыт",
+    "Конкуренты и банковский рынок",
+    "Финтех и новые технологии",
+    "Идентификация и биометрия",
+    "Санкции и ограничения",
+    "Макроэкономика и ставки",
+    "Рынки и инвестиции",
+    "Финансовые результаты и отчетность",
+    "Статистика и данные",
+)
 
 db = SQLAlchemy()
 jwt = JWTManager()
@@ -414,6 +428,28 @@ def signal_matches_filters(item, query="", categories=None, sources=None, hotnes
     return True
 
 
+def signal_sort_time(item):
+    event_time = parse_datetime(item.get("published_at") or item.get("created_at"))
+    return event_time or datetime.min.replace(tzinfo=UTC)
+
+
+def sort_signal_items(items, sort_by="time_desc"):
+    if sort_by == "time_asc":
+        items.sort(key=lambda item: (signal_sort_time(item), parse_int(item.get("id"))))
+        return
+    if sort_by == "hotness":
+        items.sort(
+            key=lambda item: (
+                parse_int(item.get("hotness")),
+                signal_sort_time(item),
+                parse_int(item.get("id")),
+            ),
+            reverse=True,
+        )
+        return
+    items.sort(key=lambda item: (signal_sort_time(item), parse_int(item.get("id"))), reverse=True)
+
+
 def list_main_signals_page(
     limit=100,
     offset=0,
@@ -440,57 +476,36 @@ def list_main_signals_page(
         where.append(f"hotness IN ({','.join('?' for _ in hotness_values)})")
         params.extend(parse_int(value) for value in hotness_values)
 
-    order_by = "id DESC"
-    if sort_by == "time_asc":
-        order_by = "id ASC"
-    elif sort_by == "hotness":
-        order_by = "hotness DESC, id DESC"
-
     sql_where = " AND ".join(where)
-    needs_post_filter = bool(query or sources or time_range)
-    sql_offset = 0 if needs_post_filter else offset
-    post_filter_offset = offset if needs_post_filter else 0
-    skipped = 0
     items = []
-    chunk_size = min(max(limit + 1, 50), 500)
     with connect_main_db() as connection:
-        while len(items) <= limit:
-            signal_rows = connection.execute(f"""
+        signal_rows = connection.execute(f"""
             SELECT id, headline, hotness, why_now, category, sources, summary, draft
             FROM signals
             WHERE {sql_where}
-            ORDER BY {order_by}
-            LIMIT ?
-            OFFSET ?
-            """, (*params, chunk_size, sql_offset)).fetchall()
-            if not signal_rows:
-                break
+            """, params).fetchall()
 
-            for row in signal_rows:
-                signal = dict(row)
-                raw_news = load_raw_news_for_signal(connection, parse_signal_source_ids(signal.get("sources")))
-                item = signal_to_frontend_item(signal, raw_news)
-                if not signal_matches_filters(
-                    item,
-                    query=query,
-                    categories=[],
-                    sources=sources,
-                    hotness_values=[],
-                    time_range=time_range,
-                ):
-                    continue
-                if skipped < post_filter_offset:
-                    skipped += 1
-                    continue
-                items.append(item)
-                if len(items) > limit:
-                    break
+        for row in signal_rows:
+            signal = dict(row)
+            raw_news = load_raw_news_for_signal(connection, parse_signal_source_ids(signal.get("sources")))
+            item = signal_to_frontend_item(signal, raw_news)
+            if not signal_matches_filters(
+                item,
+                query=query,
+                categories=[],
+                sources=sources,
+                hotness_values=[],
+                time_range=time_range,
+            ):
+                continue
+            items.append(item)
 
-            sql_offset += len(signal_rows)
+    sort_signal_items(items, sort_by)
+    page_items = items[offset:offset + limit + 1]
 
     return {
-        "items": items[:limit],
-        "has_more": len(items) > limit,
+        "items": page_items[:limit],
+        "has_more": len(page_items) > limit,
     }
 
 
@@ -549,15 +564,7 @@ def get_main_overview():
             overview["categories"] = row["categories"] or 0
             overview["important"] = row["important"] or 0
 
-        category_rows = connection.execute(f"""
-            SELECT DISTINCT category
-            FROM signals
-            WHERE {visible_filter}
-              AND category IS NOT NULL
-              AND TRIM(category) != ''
-            ORDER BY category
-        """).fetchall()
-        overview["category_options"] = [row["category"] for row in category_rows]
+        overview["category_options"] = list(CANONICAL_SIGNAL_CATEGORIES)
 
         source_row = connection.execute("""
             SELECT COUNT(DISTINCT source_id) AS sources
@@ -567,12 +574,12 @@ def get_main_overview():
             overview["sources"] = source_row["sources"] or 0
 
         source_rows = connection.execute("""
-            SELECT DISTINCT s.name AS name
-            FROM raw_news rn
-            JOIN sources s ON s.id = rn.source_id
-            WHERE s.name IS NOT NULL
-              AND TRIM(s.name) != ''
-            ORDER BY s.name
+            SELECT name
+            FROM sources
+            WHERE is_active = 1
+              AND name IS NOT NULL
+              AND TRIM(name) != ''
+            ORDER BY name
         """).fetchall()
         overview["source_options"] = [row["name"] for row in source_rows]
 
@@ -991,12 +998,18 @@ def create_app(test_config=None):
         password = data.get("password") or ""
         if not is_valid_email(email):
             return jsonify({"error": "Некорректный формат почты"}), 400
-        data = request.get_json() or {}
 
         if not full_name or not email or not password:
             return jsonify({"error": "Заполни ФИО, почту и пароль"}), 400
 
-        if User.query.filter_by(email=email).first():
+        existing = User.query.filter_by(email=email).first()
+        if existing:
+            if not existing.activated:
+                return jsonify({
+                    "error": "Аккаунт нужно активировать",
+                    "requires_activation": True,
+                    "email": existing.email,
+                }), 409
             return jsonify({"error": "Такой пользователь уже есть"}), 400
 
         user = User(
@@ -1008,25 +1021,27 @@ def create_app(test_config=None):
         )
         db.session.add(user)
         db.session.commit()
-        return jsonify({"message": "Пользователь создан", "user": user.to_dict()})
+        return jsonify({"message": "Пользователь создан", "user": user.to_dict(), "requires_activation": True})
 
     @app.post("/api/activate")
     def activate():
         data = request.get_json() or {}
         email = (data.get("email") or "").strip().lower()
         promo_code = (data.get("promo_code") or "").strip().upper()
-        payment_success = bool(data.get("payment_success"))
 
         user = User.query.filter_by(email=email).first()
         if not user:
             return jsonify({"error": "Пользователь не найден"}), 404
+        if user.activated:
+            token = create_access_token(identity=user.email)
+            return jsonify({"token": token, "user": user.to_dict(), "message": "Аккаунт уже активирован"})
 
-        promo_ok = False
-        if promo_code:
-            promo_ok = PromoCode.query.filter_by(code=promo_code, active=True).first() is not None
+        if not promo_code:
+            return jsonify({"error": "Введите код активации"}), 400
 
-        if not payment_success and not promo_ok:
-            return jsonify({"error": "Нужна оплата или активный промокод"}), 400
+        promo_ok = PromoCode.query.filter_by(code=promo_code, active=True).first() is not None
+        if not promo_ok:
+            return jsonify({"error": "Неверный код активации"}), 400
 
         user.activated = True
         db.session.commit()
@@ -1051,7 +1066,11 @@ def create_app(test_config=None):
 
         if not user.activated:
             REQUEST_METRICS["auth_denied_total"] += 1
-            return jsonify({"error": "Аккаунт ещё не активирован"}), 403
+            return jsonify({
+                "error": "Аккаунт нужно активировать",
+                "requires_activation": True,
+                "email": user.email,
+            }), 403
 
         token = create_access_token(identity=user.email)
         return jsonify({"token": token, "user": user.to_dict(), "message": "Вход выполнен"})
