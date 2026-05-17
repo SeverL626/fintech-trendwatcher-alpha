@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -32,6 +33,8 @@ MODEL_MAX_REQUESTS_PER_RUN = None
 UPDATE_PARSER_ONLY = os.getenv("UPDATE_PARSER_ONLY", "0") == "1"
 UPDATE_TIMEOUT_SECONDS = 60 * 60
 UPDATE_STATUS_PATH = Path(DB_PATH).parent / "update_status.json"
+BOOT_ID = f"{os.getpid()}-{uuid.uuid4().hex}"
+BOOT_STARTED_AT = datetime.now(MSK_TZ)
 
 app = Flask(__name__)
 app.config["DB_PATH"] = DB_PATH
@@ -396,13 +399,13 @@ def normalize_api_limit(value, default=100, maximum=10000):
     return max(1, min(maximum, limit))
 
 
-def run_parser_from_db(db_path):
+def run_parser_from_db(db_path, progress_callback=None):
     try:
         from back.parser import run_parser_from_db as parser_runner
     except ModuleNotFoundError:
         from parser import run_parser_from_db as parser_runner
 
-    return parser_runner(db_path)
+    return parser_runner(db_path, progress_callback=progress_callback)
 
 
 def run_model_from_db(db_path, limit=None):
@@ -622,7 +625,19 @@ def run_update_job_with_lock(trigger, started_at):
     parser_started_at = now_msk()
     save_parser_running_status(trigger, parser_started_at)
     try:
-        parser_result = run_parser_from_db(app.config["DB_PATH"])
+        parser_result = run_parser_from_db(
+            app.config["DB_PATH"],
+            progress_callback=lambda event, source, index, total, result=None: save_parser_progress_status(
+                trigger,
+                started_at,
+                parser_started_at,
+                event,
+                source,
+                index,
+                total,
+                result,
+            ),
+        )
     except Exception as error:
         save_update_stage_status(
             trigger,
@@ -776,6 +791,21 @@ def get_update_status():
         }
 
     if is_unfinished_running_status(status):
+        if is_runtime_lock_interrupted():
+            finished_at = now_msk()
+            status.update({
+                "state": "failed",
+                "message": "Update interrupted because backend process stopped",
+                "finished_at": finished_at.isoformat(timespec="seconds"),
+                "duration_seconds": get_status_duration_seconds(status, finished_at),
+                "error": "Backend process was stopped before update finished; stale runtime lock was detected",
+                "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
+            })
+            mark_running_stages_interrupted(status)
+            save_update_status(status)
+            remove_stale_parser_lock(force=True)
+            return status
+
         status["state"] = "running"
         started_at = parse_msk_datetime(status.get("started_at"))
         if started_at:
@@ -786,6 +816,24 @@ def get_update_status():
             save_update_status(status)
 
     return status
+
+
+def get_status_duration_seconds(status, finished_at):
+    started_at = parse_msk_datetime(status.get("started_at"))
+    if not started_at:
+        return status.get("duration_seconds", 0)
+    return max(0, int((finished_at - started_at).total_seconds()))
+
+
+def mark_running_stages_interrupted(status):
+    stages = status.get("stages") or {}
+    finished_at = status.get("finished_at")
+    for stage_status in stages.values():
+        if isinstance(stage_status, dict) and stage_status.get("state") == "running":
+            stage_status["state"] = "failed"
+            stage_status["message"] = "stage interrupted"
+            stage_status["finished_at"] = finished_at
+            stage_status["error"] = "Backend process stopped before this stage finished"
 
 
 def is_unfinished_running_status(status):
@@ -959,6 +1007,20 @@ def get_model_status():
         }
 
     if status.get("state") == "running":
+        if is_runtime_lock_interrupted():
+            finished_at = now_msk()
+            status.update({
+                "state": "failed",
+                "message": "Model interrupted because backend process stopped",
+                "finished_at": finished_at.isoformat(timespec="seconds"),
+                "duration_seconds": get_status_duration_seconds(status, finished_at),
+                "error": "Backend process was stopped before model finished; stale runtime lock was detected",
+                "stale_lock_after_seconds": MODEL_TIMEOUT_SECONDS,
+            })
+            save_model_status(status)
+            remove_stale_parser_lock(force=True)
+            return status
+
         started_at = parse_msk_datetime(status.get("started_at"))
         if started_at:
             duration_seconds = max(0, int((now_msk() - started_at).total_seconds()))
@@ -1122,6 +1184,55 @@ def save_parser_failed_status(trigger, started_at, finished_at, error):
     })
 
 
+def save_parser_progress_status(trigger, update_started_at, parser_started_at, event, source, index, total, result=None):
+    progress = {
+        "event": event,
+        "source_index": index,
+        "sources_total": total,
+        "source_id": source["id"],
+        "source_name": source["name"],
+        "updated_at": now_msk().isoformat(timespec="seconds"),
+    }
+    if result is not None:
+        progress["result"] = compact_stage_result("parser", result)
+
+    status = load_parser_status() or {}
+    status.update({
+        "state": "running",
+        "message": f"Parser is running: {source['name']} ({index}/{total})",
+        "trigger": trigger,
+        "started_at": parser_started_at.isoformat(timespec="seconds"),
+        "finished_at": None,
+        "duration_seconds": max(0, int((now_msk() - parser_started_at).total_seconds())),
+        "stale_lock_after_seconds": PARSER_TIMEOUT_SECONDS,
+        "current_source": progress,
+    })
+    save_parser_status(status)
+
+    update_status = load_update_status() or {}
+    stages = update_status.get("stages") or {}
+    parser_stage = stages.get("parser") if isinstance(stages.get("parser"), dict) else {}
+    parser_stage.update({
+        "state": "running",
+        "message": status["message"],
+        "started_at": parser_started_at.isoformat(timespec="seconds"),
+        "duration_seconds": status["duration_seconds"],
+        "current_source": progress,
+    })
+    stages["parser"] = parser_stage
+    update_status.update({
+        "state": "running",
+        "message": status["message"],
+        "trigger": trigger,
+        "started_at": update_started_at.isoformat(timespec="seconds"),
+        "finished_at": None,
+        "duration_seconds": max(0, int((now_msk() - update_started_at).total_seconds())),
+        "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
+        "stages": stages,
+    })
+    save_update_status(update_status)
+
+
 def save_parser_status(status):
     PARSER_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     PARSER_STATUS_PATH.write_text(
@@ -1222,6 +1333,7 @@ def acquire_parser_lock(trigger):
 
     lock_data = {
         "pid": os.getpid(),
+        "boot_id": BOOT_ID,
         "trigger": trigger,
         "started_at": now_msk().isoformat(timespec="seconds"),
     }
@@ -1237,20 +1349,28 @@ def release_parser_lock(lock_fd):
         pass
 
 
-def remove_stale_parser_lock():
+def remove_stale_parser_lock(force=False):
     try:
         lock_age_seconds = time.time() - PARSER_LOCK_PATH.stat().st_mtime
     except FileNotFoundError:
         return
 
+    lock_data = load_lock_data()
+    if force or is_lock_from_previous_process(lock_data):
+        unlink_parser_lock()
+        return
+
     if lock_age_seconds <= UPDATE_TIMEOUT_SECONDS:
         return
 
-    lock_data = load_lock_data()
     pid = lock_data.get("pid") if isinstance(lock_data, dict) else None
     if pid and is_pid_running(pid):
         return
 
+    unlink_parser_lock()
+
+
+def unlink_parser_lock():
     try:
         PARSER_LOCK_PATH.unlink()
     except FileNotFoundError:
@@ -1262,6 +1382,31 @@ def load_lock_data():
         return json.loads(PARSER_LOCK_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
+
+
+def is_runtime_lock_interrupted():
+    lock_data = load_lock_data()
+    if not lock_data:
+        return True
+    if is_lock_from_previous_process(lock_data):
+        return True
+    pid = lock_data.get("pid")
+    return bool(pid) and not is_pid_running(pid)
+
+
+def is_lock_from_previous_process(lock_data):
+    if not isinstance(lock_data, dict) or not lock_data:
+        return False
+
+    lock_boot_id = lock_data.get("boot_id")
+    if lock_boot_id:
+        return lock_boot_id != BOOT_ID
+
+    lock_started_at = parse_msk_datetime(lock_data.get("started_at"))
+    if lock_started_at:
+        return lock_started_at < BOOT_STARTED_AT
+
+    return False
 
 
 def is_pid_running(pid):

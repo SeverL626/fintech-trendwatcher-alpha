@@ -49,7 +49,7 @@ PARSER_ONLY_SOURCE_IDS = tuple(
 )
 
 
-def run_parser_from_db(db_path=DB_PATH):
+def run_parser_from_db(db_path=DB_PATH, progress_callback=None):
     init_db(db_path, seed_initial_source=True)
     results = []
 
@@ -70,12 +70,17 @@ def run_parser_from_db(db_path=DB_PATH):
             params = PARSER_ONLY_SOURCE_IDS
         sources = db.execute(query, params).fetchall()
 
-        for source in sources:
+        total_sources = len(sources)
+        for index, source in enumerate(sources, start=1):
+            if progress_callback:
+                progress_callback("started", source, index, total_sources)
             try:
                 result = parse_source(db, source)
             except Exception as error:
                 result = source_error_result(source, error)
             results.append(result)
+            if progress_callback:
+                progress_callback("finished", source, index, total_sources, result)
 
     return aggregate_parser_results(results)
 
