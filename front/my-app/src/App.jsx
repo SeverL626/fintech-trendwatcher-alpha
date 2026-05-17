@@ -711,7 +711,6 @@ function TopBar({ auth, onLogout }) {
   const links = [
     ['/', 'Главная'],
     ['/about', 'О проекте'],
-    ['/digests', 'Дайджесты'],
     ['/cards', 'FinTech News'],
     ['/offtop-news', 'Offtop News'],
     ['/moex', 'MOEX'],
