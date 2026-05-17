@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import time
 
 try:
     from back.connectors import get_connector
@@ -86,6 +87,7 @@ def run_parser_from_db(db_path=DB_PATH, progress_callback=None):
 
 
 def parse_source(db, source):
+    started_at = time.monotonic()
     config = load_parser_config(source["parser_config"])
     config["_existing_urls"] = load_existing_urls(db, source["id"])
     connector_name = config.get("connector") or source["source_type"]
@@ -122,6 +124,7 @@ def parse_source(db, source):
         "source_url": source["url"],
         "source_type": source["source_type"],
         "connector": connector_name,
+        "duration_seconds": round(time.monotonic() - started_at, 3),
         "found": len(items),
         "created": created,
         "market_stats_found": len(market_stats),
@@ -166,6 +169,16 @@ def aggregate_parser_results(results):
         "skipped_quality": skipped_quality,
         "errors": errors,
         "empty_sources": empty_sources,
+        "duration_seconds": round(sum(item.get("duration_seconds", 0) for item in results), 3),
+        "slow_sources": [
+            {
+                "source_id": item.get("source_id"),
+                "source_name": item.get("source_name"),
+                "duration_seconds": item.get("duration_seconds", 0),
+            }
+            for item in sorted(results, key=lambda item: item.get("duration_seconds", 0), reverse=True)[:5]
+            if item.get("duration_seconds")
+        ],
         "summary": [
             format_source_summary(item)
             for item in results

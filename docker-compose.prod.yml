@@ -7,6 +7,7 @@ services:
     environment:
       DB_PATH: ${DB_PATH:-/app/data/app.db}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      UPDATE_STATUS_TOKEN: ${UPDATE_STATUS_TOKEN:-}
       UPDATE_PARSER_ONLY: ${UPDATE_PARSER_ONLY:-0}
       PARSER_ONLY_SOURCE_IDS: ${PARSER_ONLY_SOURCE_IDS:-}
     ports:
@@ -27,6 +28,7 @@ services:
       FRONT_BACKEND_DB_PATH: /app/data/redcat.db
       UPDATE_API_URL: http://backend:5000/update
       UPDATE_STATUS_URL: http://backend:5000/update/status
+      UPDATE_STATUS_TOKEN: ${UPDATE_STATUS_TOKEN:-}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-redcat-secret-key-change-me-32-bytes}
     ports:
       - "127.0.0.1:${FRONT_BACKEND_PORT:-5001}:5001"

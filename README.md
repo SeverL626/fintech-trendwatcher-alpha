@@ -2,12 +2,14 @@
 
 Сервис трендвотчера для финтех-публикаций: парсер собирает новости, модель OpenRouter превращает их в карточки сигналов, дедупликатор склеивает повторы, фронт показывает готовую витрину.
 
- ## Admin access
+ ## Admin access + /update/status
 
 **Promo codes:** REDCAT2026
 
 - manager@redcat.ru
 - rqbqerj1543tgjkq
+
+> https://redcat-news.ru/update/status?token=rqbqerj1543tgjkq
 
 ## Быстрый Запуск
 

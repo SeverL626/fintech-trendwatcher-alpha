@@ -26,6 +26,7 @@ MAIN_DB_PATH = Path(os.getenv("MAIN_DB_PATH") or os.getenv("DB_PATH") or ROOT_DI
 FRONT_BACKEND_DB_PATH = Path(os.getenv("FRONT_BACKEND_DB_PATH") or ROOT_DIR / "data" / "redcat.db")
 UPDATE_API_URL = os.getenv("UPDATE_API_URL", "http://127.0.0.1:5000/update")
 UPDATE_STATUS_URL = os.getenv("UPDATE_STATUS_URL", "http://127.0.0.1:5000/update/status")
+UPDATE_STATUS_TOKEN = os.getenv("UPDATE_STATUS_TOKEN", "")
 MAX_API_LIMIT = 10000
 MSK = timezone(timedelta(hours=3))
 CANONICAL_SIGNAL_CATEGORIES = (
@@ -903,8 +904,11 @@ def create_app(test_config=None):
 
     @app.get("/api/update/status")
     def update_status():
+        headers = {}
+        if UPDATE_STATUS_TOKEN:
+            headers["X-Admin-Token"] = UPDATE_STATUS_TOKEN
         try:
-            response = requests.get(UPDATE_STATUS_URL, timeout=10)
+            response = requests.get(UPDATE_STATUS_URL, headers=headers, timeout=10)
         except requests.RequestException as error:
             return jsonify({"ok": False, "error": "Backend update status is unavailable", "details": str(error)}), 502
         try:

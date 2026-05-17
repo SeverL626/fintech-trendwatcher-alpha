@@ -1,4 +1,5 @@
 import json
+import hmac
 import os
 import re
 import threading
@@ -33,6 +34,7 @@ MODEL_MAX_REQUESTS_PER_RUN = None
 UPDATE_PARSER_ONLY = os.getenv("UPDATE_PARSER_ONLY", "0") == "1"
 UPDATE_TIMEOUT_SECONDS = 60 * 60
 UPDATE_STATUS_PATH = Path(DB_PATH).parent / "update_status.json"
+UPDATE_STATUS_TOKEN = os.getenv("UPDATE_STATUS_TOKEN", "")
 BOOT_ID = f"{os.getpid()}-{uuid.uuid4().hex}"
 BOOT_STARTED_AT = datetime.now(MSK_TZ)
 
@@ -48,7 +50,7 @@ _scheduler_start_lock = threading.Lock()
 @app.after_request
 def add_cors_headers(response):
     response.headers.setdefault("Access-Control-Allow-Origin", "*")
-    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token")
     response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
     return response
 
@@ -90,6 +92,9 @@ def run_update():
 
 @app.route("/update/status")
 def update_status():
+    token_error = require_update_status_token()
+    if token_error:
+        return token_error
     status = get_update_status()
     return jsonify({
         "ok": status.get("state") != "failed",
@@ -142,6 +147,9 @@ def api_run_update():
 
 @app.route("/api/update/status")
 def api_update_status():
+    token_error = require_update_status_token()
+    if token_error:
+        return token_error
     status = get_update_status()
     return jsonify({
         "ok": status.get("state") != "failed",
@@ -397,6 +405,35 @@ def normalize_api_limit(value, default=100, maximum=10000):
     except (TypeError, ValueError):
         limit = default
     return max(1, min(maximum, limit))
+
+
+def require_update_status_token():
+    if not UPDATE_STATUS_TOKEN:
+        return None
+    if is_valid_update_status_token():
+        return None
+    return jsonify({
+        "ok": False,
+        "error": "Unauthorized",
+    }), 401
+
+
+def is_valid_update_status_token():
+    token = (
+        request.headers.get("X-Admin-Token")
+        or request.args.get("token")
+        or request.args.get("auth")
+        or bearer_token_from_header(request.headers.get("Authorization"))
+        or ""
+    )
+    return hmac.compare_digest(token, UPDATE_STATUS_TOKEN)
+
+
+def bearer_token_from_header(value):
+    value = str(value or "").strip()
+    if not value.lower().startswith("bearer "):
+        return ""
+    return value[7:].strip()
 
 
 def run_parser_from_db(db_path, progress_callback=None):
@@ -1194,7 +1231,7 @@ def save_parser_progress_status(trigger, update_started_at, parser_started_at, e
         "updated_at": now_msk().isoformat(timespec="seconds"),
     }
     if result is not None:
-        progress["result"] = compact_stage_result("parser", result)
+        progress["result"] = result
 
     status = load_parser_status() or {}
     status.update({
