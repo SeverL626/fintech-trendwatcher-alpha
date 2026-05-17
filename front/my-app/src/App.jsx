@@ -912,7 +912,7 @@ function AboutPage() {
       <section className="card page-head placeholder-page">
         <h1>Данная страница еще в разработке</h1>
         <p>Скоро здесь появится описание проекта, команды и материалов.</p>
-        <img className="placeholder-cat" src="/working-cat.png" alt="Страница в разработке" />
+        <img className="placeholder-cat" src="/working-cat.svg" alt="Страница в разработке" />
       </section>
     </div>
   )
@@ -924,7 +924,7 @@ function DigestsPage() {
       <section className="card page-head placeholder-page">
         <h1>Данная страница еще в разработке</h1>
         <p>В будущем здесь будет располагаться краткая еженедельная сводка.</p>
-        <img className="placeholder-cat" src="/working-cat.png" alt="Дайджесты в разработке" />
+        <img className="placeholder-cat" src="/working-cat.svg" alt="Дайджесты в разработке" />
       </section>
     </div>
   )
