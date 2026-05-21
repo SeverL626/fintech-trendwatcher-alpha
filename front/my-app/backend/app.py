@@ -85,6 +85,7 @@ class User(db.Model):
     subscription_plan = db.Column(db.String(40), default="")
     subscription_status = db.Column(db.String(40), default="inactive")
     subscription_expires_at = db.Column(db.DateTime, nullable=True)
+    demo_used = db.Column(db.Boolean, default=False)
     avatar_url = db.Column(db.Text, default="")
     bio = db.Column(db.Text, default="")
 
@@ -98,6 +99,7 @@ class User(db.Model):
             "subscription_plan": self.subscription_plan or "",
             "subscription_status": self.subscription_status or "inactive",
             "subscription_expires_at": self.subscription_expires_at.isoformat() if self.subscription_expires_at else "",
+            "demo_used": bool(self.demo_used),
             "avatar_url": self.avatar_url or "",
             "bio": self.bio or "",
         }
@@ -1031,14 +1033,31 @@ def activate_subscription(user: User, plan: str):
     plan = (plan or "").strip().lower()
     if plan not in AVAILABLE_PLANS:
         return False, "На данный момент не доступна"
-    if plan == DEMO_PLAN and user.subscription_plan == DEMO_PLAN:
+    if plan == DEMO_PLAN and (user.demo_used or user.subscription_plan == DEMO_PLAN or user.subscription_status == "expired"):
         return False, "Демо-доступ нельзя подключить повторно"
 
     user.activated = True
     user.subscription_plan = plan
     user.subscription_status = ACTIVE_SUBSCRIPTION
     user.subscription_expires_at = utcnow() + timedelta(days=PLAN_DURATIONS_DAYS[plan])
+    if plan == DEMO_PLAN:
+        user.demo_used = True
     return True, ""
+
+
+def normalize_admin_subscription(plan, status):
+    plan = (plan or "").strip().lower()
+    status = (status or "inactive").strip().lower()
+
+    if plan and plan not in PLAN_DURATIONS_DAYS:
+        return None, None, "Неизвестный тариф"
+    if status not in {ACTIVE_SUBSCRIPTION, "inactive", "expired"}:
+        return None, None, "Неизвестный статус подписки"
+    if not plan:
+        return "", "inactive", ""
+    if status == ACTIVE_SUBSCRIPTION and plan not in PLAN_DURATIONS_DAYS:
+        return None, None, "Нельзя активировать аккаунт без подписки"
+    return plan, status, ""
 
 
 def ensure_frontend_schema():
@@ -1053,6 +1072,14 @@ def ensure_frontend_schema():
             connection.exec_driver_sql("ALTER TABLE user ADD COLUMN subscription_status TEXT DEFAULT 'inactive'")
         if "subscription_expires_at" not in user_columns:
             connection.exec_driver_sql("ALTER TABLE user ADD COLUMN subscription_expires_at DATETIME")
+        if "demo_used" not in user_columns:
+            connection.exec_driver_sql("ALTER TABLE user ADD COLUMN demo_used BOOLEAN DEFAULT 0")
+        connection.exec_driver_sql("""
+            UPDATE user
+            SET demo_used = 1
+            WHERE (subscription_plan = 'demo' OR subscription_status = 'expired')
+              AND COALESCE(demo_used, 0) = 0
+        """)
 
         notification_columns = {
             row[1]
@@ -1076,6 +1103,7 @@ def upsert_seed_users():
         user.subscription_plan = item.get("subscription_plan", DEMO_PLAN)
         user.subscription_status = item.get("subscription_status", ACTIVE_SUBSCRIPTION)
         user.subscription_expires_at = item.get("subscription_expires_at")
+        user.demo_used = bool(item.get("demo_used", user.subscription_plan == DEMO_PLAN))
     db.session.commit()
 
 
@@ -1381,6 +1409,7 @@ def create_app(test_config=None):
             activated=False,
             subscription_plan="",
             subscription_status="inactive",
+            demo_used=False,
         )
         db.session.add(user)
         db.session.commit()
@@ -1396,10 +1425,11 @@ def create_app(test_config=None):
         if not user:
             return jsonify({"error": "Пользователь не найден"}), 404
 
-        if user.activated:
-            refresh_subscription_status(user)
-            if db.session.is_modified(user):
-                db.session.commit()
+        refresh_subscription_status(user)
+        if db.session.is_modified(user):
+            db.session.commit()
+
+        if user.activated and user.subscription_status == ACTIVE_SUBSCRIPTION:
             token = create_access_token(identity=user.email)
             return jsonify({"token": token, "user": user.to_dict(), "message": "Аккаунт уже активирован"})
 
@@ -1625,9 +1655,16 @@ def create_app(test_config=None):
             user.activated = bool(data.get("activated"))
         if "subscription_plan" in data:
             user.subscription_plan = (data.get("subscription_plan") or "").strip()
+            if user.subscription_plan == DEMO_PLAN:
+                user.demo_used = True
         if "subscription_status" in data:
             user.subscription_status = (data.get("subscription_status") or "").strip() or "inactive"
             user.activated = user.subscription_status == ACTIVE_SUBSCRIPTION
+        if not user.subscription_plan:
+            user.subscription_status = "inactive"
+            user.activated = False
+        if user.subscription_status == ACTIVE_SUBSCRIPTION and not user.subscription_plan:
+            return jsonify({"error": "Нельзя активировать аккаунт без подписки"}), 400
 
         db.session.commit()
         return jsonify({"message": "Пользователь обновлён", "user": user.to_dict()})
@@ -1649,11 +1686,18 @@ def create_app(test_config=None):
         if user.email == MANAGER_EMAIL:
             return jsonify({"error": "Подписку менеджера менять нельзя"}), 400
 
-        status = (data.get("subscription_status") or "inactive").strip()
-        plan = (data.get("subscription_plan") or "").strip()
+        plan, status, error = normalize_admin_subscription(
+            data.get("subscription_plan"),
+            data.get("subscription_status"),
+        )
+        if error:
+            return jsonify({"error": error}), 400
+
         user.subscription_plan = plan
         user.subscription_status = status
         user.activated = status == ACTIVE_SUBSCRIPTION
+        if plan == DEMO_PLAN:
+            user.demo_used = True
         if status == ACTIVE_SUBSCRIPTION and plan in PLAN_DURATIONS_DAYS:
             user.subscription_expires_at = utcnow() + timedelta(days=PLAN_DURATIONS_DAYS[plan])
         if status != ACTIVE_SUBSCRIPTION:

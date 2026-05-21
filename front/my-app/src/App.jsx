@@ -2180,13 +2180,21 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
   const [notice, setNotice] = useState('')
 
   const updateSubscription = async (user, patch) => {
+    const nextPlan = Object.prototype.hasOwnProperty.call(patch, 'subscription_plan')
+      ? patch.subscription_plan
+      : (user.subscription_plan || '')
+    const nextStatus = !nextPlan
+      ? 'inactive'
+      : (Object.prototype.hasOwnProperty.call(patch, 'subscription_status')
+        ? patch.subscription_status
+        : (user.subscription_status || 'inactive'))
+
     try {
       await apiFetch(`/api/admin/subscriptions/${user.id}`, {
         method: 'PUT',
         body: JSON.stringify({
-          subscription_plan: user.subscription_plan || '',
-          subscription_status: user.subscription_status || 'inactive',
-          ...patch,
+          subscription_plan: nextPlan,
+          subscription_status: nextStatus,
         }),
       }, auth.token)
       await refreshAdmin(auth.token)
@@ -2240,11 +2248,13 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
                 <td>
                   {user.email === 'manager@redcat.tu' ? subscriptionStatusLabel(user.subscription_status) : (
                     <CustomSelect
-                      value={user.subscription_status || 'inactive'}
-                      options={[
+                      value={user.subscription_plan ? (user.subscription_status || 'inactive') : 'inactive'}
+                      options={user.subscription_plan ? [
                         { value: 'active', label: 'Активна' },
                         { value: 'inactive', label: 'Отключена' },
                         { value: 'expired', label: 'Истекла' },
+                      ] : [
+                        { value: 'inactive', label: 'Без подписки' },
                       ]}
                       onChange={(value) => updateSubscription(user, { subscription_status: value })}
                     />
@@ -2265,13 +2275,21 @@ function AdminSubscriptionsPage({ auth, users, refreshAdmin }) {
   const [notice, setNotice] = useState('')
 
   const updateSubscription = async (user, patch) => {
+    const nextPlan = Object.prototype.hasOwnProperty.call(patch, 'subscription_plan')
+      ? patch.subscription_plan
+      : (user.subscription_plan || '')
+    const nextStatus = !nextPlan
+      ? 'inactive'
+      : (Object.prototype.hasOwnProperty.call(patch, 'subscription_status')
+        ? patch.subscription_status
+        : (user.subscription_status || 'inactive'))
+
     try {
       await apiFetch(`/api/admin/subscriptions/${user.id}`, {
         method: 'PUT',
         body: JSON.stringify({
-          subscription_plan: user.subscription_plan || '',
-          subscription_status: user.subscription_status || 'inactive',
-          ...patch,
+          subscription_plan: nextPlan,
+          subscription_status: nextStatus,
         }),
       }, auth.token)
       await refreshAdmin(auth.token)
@@ -2317,10 +2335,12 @@ function AdminSubscriptionsPage({ auth, users, refreshAdmin }) {
                 </td>
                 <td>
                   <CustomSelect
-                    value={user.subscription_status || 'inactive'}
-                    options={[
+                    value={user.subscription_plan ? (user.subscription_status || 'inactive') : 'inactive'}
+                    options={user.subscription_plan ? [
                       { value: 'active', label: 'Активна' },
                       { value: 'inactive', label: 'Отключена' },
+                    ] : [
+                      { value: 'inactive', label: 'Без подписки' },
                     ]}
                     onChange={(value) => updateSubscription(user, { subscription_status: value })}
                   />
