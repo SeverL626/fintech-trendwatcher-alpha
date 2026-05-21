@@ -382,6 +382,43 @@ textarea { resize: vertical; }
   text-align: left;
 }
 .market-table th { color: var(--yellow); }
+.admin-users-card {
+  overflow: visible;
+}
+.admin-users-table {
+  min-width: 0;
+  table-layout: fixed;
+}
+.admin-users-table th:nth-child(1),
+.admin-users-table td:nth-child(1) {
+  width: 64px;
+}
+.admin-users-table th:nth-child(2),
+.admin-users-table td:nth-child(2) {
+  width: 18%;
+}
+.admin-users-table th:nth-child(3),
+.admin-users-table td:nth-child(3) {
+  width: 24%;
+}
+.admin-users-table th:nth-child(4),
+.admin-users-table td:nth-child(4) {
+  width: 90px;
+}
+.admin-users-table th:nth-child(5),
+.admin-users-table td:nth-child(5),
+.admin-users-table th:nth-child(6),
+.admin-users-table td:nth-child(6) {
+  width: 190px;
+}
+.admin-users-table th:nth-child(7),
+.admin-users-table td:nth-child(7) {
+  width: 180px;
+}
+.admin-users-table td {
+  vertical-align: top;
+  overflow: visible;
+}
 .moex-kpi-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1007,11 +1044,20 @@ textarea { resize: vertical; }
   max-height: min(360px, 52vh);
   overflow: hidden;
 }
+.custom-select.drop-up .select-options {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
 
 .cards-toolbar .select-options,
 .notification-rule-card .select-options {
   right: auto;
   width: min(420px, calc(100vw - 48px));
+  min-width: 100%;
+}
+.admin-users-card .select-options {
+  right: auto;
+  width: min(360px, calc(100vw - 48px));
   min-width: 100%;
 }
 

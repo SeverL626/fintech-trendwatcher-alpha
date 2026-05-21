@@ -15,6 +15,8 @@ function loadAuth() {
 function CustomSelect({ value, onChange, options }) {
   const [isOpen, setIsOpen] = React.useState(false);
   const [search, setSearch] = React.useState('');
+  const [placement, setPlacement] = React.useState('down');
+  const rootRef = React.useRef(null);
   const selectedLabel = options.find(o => String(o.value) === String(value))?.label || value;
   const filteredOptions = options.filter((opt) =>
     String(opt.label || opt.value || '').toLowerCase().includes(search.trim().toLowerCase())
@@ -22,13 +24,19 @@ function CustomSelect({ value, onChange, options }) {
 
   const toggleOpen = () => {
     setIsOpen((current) => {
-      if (!current) setSearch('')
+      if (!current) {
+        setSearch('')
+        const rect = rootRef.current?.getBoundingClientRect()
+        const spaceBelow = window.innerHeight - (rect?.bottom || 0)
+        const spaceAbove = rect?.top || 0
+        setPlacement(spaceBelow < 360 && spaceAbove > spaceBelow ? 'up' : 'down')
+      }
       return !current
     })
   }
 
   return (
-    <div className="custom-select">
+    <div className={`custom-select ${placement === 'up' ? 'drop-up' : ''}`} ref={rootRef}>
       <div className="select-trigger" onClick={toggleOpen}>
         {selectedLabel}
       </div>
@@ -70,6 +78,8 @@ function CustomSelect({ value, onChange, options }) {
 function MultiSelect({ values, onChange, options, placeholder }) {
   const [isOpen, setIsOpen] = React.useState(false)
   const [search, setSearch] = React.useState('')
+  const [placement, setPlacement] = React.useState('down')
+  const rootRef = React.useRef(null)
   const selected = Array.isArray(values) ? values : []
   const selectedLabels = options
     .filter((option) => selected.includes(String(option.value)))
@@ -81,7 +91,13 @@ function MultiSelect({ values, onChange, options, placeholder }) {
 
   const toggleOpen = () => {
     setIsOpen((current) => {
-      if (!current) setSearch('')
+      if (!current) {
+        setSearch('')
+        const rect = rootRef.current?.getBoundingClientRect()
+        const spaceBelow = window.innerHeight - (rect?.bottom || 0)
+        const spaceAbove = rect?.top || 0
+        setPlacement(spaceBelow < 360 && spaceAbove > spaceBelow ? 'up' : 'down')
+      }
       return !current
     })
   }
@@ -94,7 +110,7 @@ function MultiSelect({ values, onChange, options, placeholder }) {
   }
 
   return (
-    <div className="custom-select multi-select">
+    <div className={`custom-select multi-select ${placement === 'up' ? 'drop-up' : ''}`} ref={rootRef}>
       <div className="select-trigger" onClick={toggleOpen}>
         {label}
       </div>
@@ -145,17 +161,29 @@ function openExternalTab(url) {
   if (opened) opened.opener = null
 }
 
+function parseDisplayDate(value) {
+  if (!value) return new Date(NaN)
+  let text = String(value).trim()
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text)) {
+    text = text.replace(' ', 'T')
+  }
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text) && !/(Z|[+-]\d{2}:\d{2})$/.test(text)) {
+    text = `${text}Z`
+  }
+  return new Date(text)
+}
+
 function formatDate(value) {
-  if (!value) return '—'
-  const date = new Date(value)
+  const date = parseDisplayDate(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return date.toLocaleString('ru-RU', {
+  const text = date.toLocaleString('ru-RU', {
     timeZone: 'Europe/Moscow',
     day: '2-digit',
     month: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
   })
+  return `${text} (MSK)`
 }
 
 function signalTime(item) {
@@ -165,10 +193,9 @@ function signalTime(item) {
 }
 
 function compactDate(value) {
-  if (!value) return '—'
-  const date = new Date(value)
+  const date = parseDisplayDate(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return date.toLocaleString('ru-RU', {
+  const text = date.toLocaleString('ru-RU', {
     timeZone: 'Europe/Moscow',
     day: '2-digit',
     month: '2-digit',
@@ -176,6 +203,7 @@ function compactDate(value) {
     hour: '2-digit',
     minute: '2-digit',
   })
+  return `${text} (MSK)`
 }
 
 function planLabel(plan) {
@@ -2149,10 +2177,6 @@ function LoginPage({ onAuth }) {
 }
 
 function AdminUsersPage({ auth, users, refreshAdmin }) {
-  const [current, setCurrent] = useState(null)
-  const [fullName, setFullName] = useState('')
-  const [email, setEmail] = useState('')
-  const [activated, setActivated] = useState(false)
   const [notice, setNotice] = useState('')
 
   const updateSubscription = async (user, patch) => {
@@ -2172,123 +2196,66 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
     }
   }
 
-  const submitRenewal = (event) => {
-    event.preventDefault()
-    setNotice('На данный момент не доступна')
-  }
-
-  const openEdit = (user) => {
-    setCurrent(user)
-    setFullName(user.full_name)
-    setEmail(user.email)
-    setActivated(user.activated)
-  }
-
-  const save = async (e) => {
-    e.preventDefault()
-    if (!current) return
-    try {
-      await apiFetch(`/api/admin/users/${current.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ full_name: fullName, email, activated }),
-      }, auth.token)
-
-      await refreshAdmin(auth.token)
-      setNotice('Пользователь обновлён')
-    } catch (error) {
-      setNotice(error.message)
-    }
-  }
-
   return (
     <div className="stack">
       <section className="card page-head">
         <h1>Пользователи</h1>
-        <p>Таблица аккаунтов, подписок и срока доступа.</p>
+        <p>Полная таблица аккаунтов и подписок. Профили пользователей здесь не редактируются.</p>
       </section>
 
-      <section className="grid-2">
-        <div className="card table-wrap">
-          <table className="market-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Логин</th>
-                <th>Почта</th>
-                <th>Роль</th>
-                <th>Подписка</th>
-                <th>Статус</th>
-                <th>До</th>
-                <th />
+      <section className="card admin-users-card">
+        <table className="market-table admin-users-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Логин</th>
+              <th>Почта</th>
+              <th>Роль</th>
+              <th>Подписка</th>
+              <th>Статус</th>
+              <th>До</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((user) => (
+              <tr key={user.id}>
+                <td>{user.id}</td>
+                <td>{user.full_name}</td>
+                <td>{user.email}</td>
+                <td>{user.role}</td>
+                <td>
+                  {user.email === 'manager@redcat.tu' ? planLabel(user.subscription_plan) : (
+                    <CustomSelect
+                      value={user.subscription_plan || ''}
+                      options={[
+                        { value: '', label: 'Без подписки' },
+                        { value: 'demo', label: 'Демо · 7 дней' },
+                        { value: 'basic', label: 'Basic · 31 день' },
+                        { value: 'plus', label: 'Plus · 31 день' },
+                      ]}
+                      onChange={(value) => updateSubscription(user, { subscription_plan: value })}
+                    />
+                  )}
+                </td>
+                <td>
+                  {user.email === 'manager@redcat.tu' ? subscriptionStatusLabel(user.subscription_status) : (
+                    <CustomSelect
+                      value={user.subscription_status || 'inactive'}
+                      options={[
+                        { value: 'active', label: 'Активна' },
+                        { value: 'inactive', label: 'Отключена' },
+                        { value: 'expired', label: 'Истекла' },
+                      ]}
+                      onChange={(value) => updateSubscription(user, { subscription_status: value })}
+                    />
+                  )}
+                </td>
+                <td>{user.subscription_expires_at ? compactDate(user.subscription_expires_at) : '—'}</td>
               </tr>
-            </thead>
-            <tbody>
-              {users.map((user) => (
-                <tr key={user.id}>
-                  <td>{user.id}</td>
-                  <td>{user.full_name}</td>
-                  <td>{user.email}</td>
-                  <td>{user.role}</td>
-                  <td>
-                    {user.email === 'manager@redcat.tu' ? planLabel(user.subscription_plan) : (
-                      <CustomSelect
-                        value={user.subscription_plan || ''}
-                        options={[
-                          { value: '', label: 'Без подписки' },
-                          { value: 'demo', label: 'Демо · 7 дней' },
-                          { value: 'basic', label: 'Basic · 31 день' },
-                          { value: 'plus', label: 'Plus · 31 день' },
-                        ]}
-                        onChange={(value) => updateSubscription(user, { subscription_plan: value })}
-                      />
-                    )}
-                  </td>
-                  <td>
-                    {user.email === 'manager@redcat.tu' ? subscriptionStatusLabel(user.subscription_status) : (
-                      <CustomSelect
-                        value={user.subscription_status || 'inactive'}
-                        options={[
-                          { value: 'active', label: 'Активна' },
-                          { value: 'inactive', label: 'Отключена' },
-                          { value: 'expired', label: 'Истекла' },
-                        ]}
-                        onChange={(value) => updateSubscription(user, { subscription_status: value })}
-                      />
-                    )}
-                  </td>
-                  <td>{user.subscription_expires_at ? compactDate(user.subscription_expires_at) : '—'}</td>
-                  <td>
-                    <button className="button ghost" onClick={() => openEdit(user)}>Редактировать</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="card form-card">
-          <h3>Редактирование</h3>
-          {current ? (
-            <form className="form-grid" onSubmit={save}>
-              <label className="field">
-                <span>Логин</span>
-                <input value={fullName} onChange={(e) => setFullName(e.target.value)} />
-              </label>
-              <label className="field">
-                <span>Почта</span>
-                <input value={email} onChange={(e) => setEmail(e.target.value)} />
-              </label>
-              <label className="promo-switch">
-                <input type="checkbox" checked={activated} onChange={(e) => setActivated(e.target.checked)} />
-                Активирован
-              </label>
-              <button className="button primary full" type="submit">Сохранить</button>
-            </form>
-          ) : (
-            <p className="muted">Выбери пользователя слева.</p>
-          )}
-          {notice ? <div className="flash">{notice}</div> : null}
-        </div>
+            ))}
+          </tbody>
+        </table>
+        {notice ? <div className="flash">{notice}</div> : null}
       </section>
     </div>
   )

@@ -920,7 +920,7 @@ def list_main_market(limit=100, offset=0, query="", sort_by="value_desc", moveme
             "value_rub": row["value_rub"],
             "volume": row["volume"],
             "trades": row["numtrades"],
-            "fetched_at": row["fetched_at"],
+            "fetched_at": to_moscow_iso(row["fetched_at"]),
         }
         for row in rows[:limit]
     ]
@@ -935,7 +935,7 @@ def list_main_market(limit=100, offset=0, query="", sort_by="value_desc", moveme
             "total_trades": snapshot_row["total_trades"],
             "top_value_ticker": snapshot_row["top_secid"] or snapshot_row["top_shortname"],
             "top_value": snapshot_row["top_value"],
-            "fetched_at": snapshot_row["fetched_at"],
+            "fetched_at": to_moscow_iso(snapshot_row["fetched_at"]),
         }
         if leader_gain_row:
             snapshot["leader_gain_ticker"] = leader_gain_row["secid"] or leader_gain_row["shortname"]
