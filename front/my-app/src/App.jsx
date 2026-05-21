@@ -772,7 +772,7 @@ export default function App() {
       try {
         await loadAll()
       } catch (error) {
-        if (alive) setMessage(error.message)
+        if (alive) flash(error.message)
       } finally {
         if (alive) setLoading(false)
       }
@@ -798,7 +798,11 @@ export default function App() {
   useEffect(() => {
     const handler = (event) => flash(event.detail || 'Готово')
     window.addEventListener('redcat:flash', handler)
-    return () => window.removeEventListener('redcat:flash', handler)
+    return () => {
+      window.removeEventListener('redcat:flash', handler)
+      window.clearTimeout(window.__redcatFlashTimer)
+      window.clearTimeout(window.__redcatFlashCloseTimer)
+    }
   }, [])
 
   const saveProfile = async (payload) => {
@@ -810,7 +814,7 @@ export default function App() {
     const next = { token: auth.token, user: data.user }
     localStorage.setItem('redcat_auth', JSON.stringify(next))
     setAuth(next)
-    setMessage('Профиль сохранён')
+    flash('Профиль сохранён')
     await refreshSession(auth.token)
   }
 
@@ -1126,9 +1130,9 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
           <p>Сервис мониторит финтех-новости, банковский рынок и регуляторные изменения, превращая поток публикаций в понятные аналитические карточки.</p>
           <div className="hero-actions">
             <Link to="/cards" className="button primary">Открыть FinTech News</Link>
-            {auth && auth.user?.role !== 'admin' && auth.user?.subscription_status === 'active' ? (
+            {auth && (auth.user?.role === 'admin' || auth.user?.subscription_status === 'active') ? (
               <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
-                {updating ? 'Запускаю...' : 'Обновить базу'}
+                {updating ? 'Запускаю...' : 'Обновить БД'}
               </button>
             ) : null}
           </div>
