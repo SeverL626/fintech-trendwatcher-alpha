@@ -1,7 +1,7 @@
 import json
 import re
 from datetime import datetime
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, urlencode, unquote, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -282,14 +282,69 @@ class HtmlFilesConnector(HtmlConnector):
 class MoexStatsConnector(BaseConnector):
     name = "moex"
 
+    PERCENT_CHANGE_FIELDS = (
+        "LASTCHANGEPRCNT",
+        "LASTTOPREVPRICE",
+        "WAPRICECHANGEPRCNT",
+        "CHANGEPRCNT",
+        "change_percent",
+    )
+
     def parse(self, _source, _config):
+        # MOEX market data is not a news source and must not create raw_news.
         return []
 
     def parse_market_stats(self, source, config):
-        response = self.fetch(source["url"], config)
-        payload = response.json()
-        records = self.extract_records(payload)
+        instruments = self.parse_market_instruments(source, config)
+        if not instruments:
+            return []
+        fallback_date = instruments[0].get("trade_date") or datetime.now().strftime("%Y-%m-%d")
+        return [self.aggregate_daily_stats(instruments, fallback_date)]
+
+    def parse_market_instruments(self, source, config):
+        """
+        Extract current MOEX ISS marketdata rows for selected instruments.
+
+        This method returns normalized per-instrument rows. It does not create news,
+        does not call LLM and does not store anything.
+        """
         max_items = int(config.get("max_items") or 200)
+        page_size = max(1, int(config.get("page_size") or 100))
+        paginate = bool(config.get("paginate", True))
+        market_records = []
+        seen = set()
+        start = 0
+
+        while len(market_records) < max_items:
+            url = moex_url_with_query(source["url"], {
+                "start": start,
+                "iss.meta": "off",
+                "iss.only": "securities,marketdata",
+            })
+            response = self.fetch(url, config)
+            records = self.extract_records(response.json())
+            page_records = self.normalize_market_records(records)
+            if not page_records:
+                break
+
+            added = 0
+            for record in page_records:
+                key = (record.get("trade_date"), record.get("secid"), record.get("boardid") or "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                market_records.append(record)
+                added += 1
+                if len(market_records) >= max_items:
+                    break
+
+            if not paginate or added == 0 or len(page_records) < page_size:
+                break
+            start += page_size
+
+        return market_records[:max_items]
+
+    def normalize_market_records(self, records):
         today = datetime.now().strftime("%Y-%m-%d")
         names_by_secid = self.extract_security_names(records)
         preferred_records = [
@@ -297,39 +352,43 @@ class MoexStatsConnector(BaseConnector):
             for record in records
             if record.get("_table") == "marketdata"
         ] or records
-        market_records = []
 
+        market_records = []
         for record in preferred_records:
             secid = value_from_keys(record, ["SECID", "secid"])
             if not secid:
                 continue
             names = names_by_secid.get(secid, {})
+            value_rub = to_float(value_from_keys(record, ["VALTODAY_RUR", "VALTODAY", "VALUE", "value"]))
+            value_usd = to_float(value_from_keys(record, ["VALTODAY_USD", "VALUE_USD", "value_usd"]))
             market_records.append({
                 "secid": secid,
-                "boardid": value_from_keys(record, ["BOARDID", "boardid"]),
+                "boardid": value_from_keys(record, ["BOARDID", "boardid"]) or "",
                 "shortname": value_from_keys(record, ["SHORTNAME", "shortname"]) or names.get("shortname"),
                 "secname": value_from_keys(record, ["SECNAME", "secname"]) or names.get("secname"),
                 "trade_date": moex_trade_date(record) or today,
                 "last": to_float(value_from_keys(record, ["LAST", "last"])),
+                "open": to_float(value_from_keys(record, ["OPEN", "open"])),
+                "high": to_float(value_from_keys(record, ["HIGH", "high"])),
+                "low": to_float(value_from_keys(record, ["LOW", "low"])),
                 "marketprice": to_float(value_from_keys(
                     record,
                     ["MARKETPRICETODAY", "MARKETPRICE", "marketprice", "MARKETPRICE2"],
                 )),
-                "open": to_float(value_from_keys(record, ["OPEN", "open"])),
-                "high": to_float(value_from_keys(record, ["HIGH", "high"])),
-                "low": to_float(value_from_keys(record, ["LOW", "low"])),
-                "value": to_float(value_from_keys(record, ["VALTODAY_RUR", "VALTODAY", "VALUE", "value"])),
-                "value_usd": to_float(value_from_keys(record, ["VALTODAY_USD", "VALUE_USD"])),
+                "value": value_rub,
+                "value_rub": value_rub,
+                "value_usd": value_usd,
                 "volume": to_float(value_from_keys(record, ["VOLTODAY", "VOLUME", "volume"])),
                 "numtrades": to_int(value_from_keys(record, ["NUMTRADES", "numtrades"])),
+                "change_percent": self.extract_change_percent(record),
                 "systime": value_from_keys(record, ["SYSTIME", "systime"]),
                 "raw_data": record,
             })
+        return market_records
 
-        if not market_records:
-            return []
-
-        return [self.aggregate_daily_stats(market_records[:max_items], today)]
+    def extract_change_percent(self, record):
+        # Do not use plain CHANGE: MOEX can expose it as absolute price change.
+        return to_float(value_from_keys(record, self.PERCENT_CHANGE_FIELDS))
 
     def extract_security_names(self, records):
         names = {}
@@ -347,7 +406,7 @@ class MoexStatsConnector(BaseConnector):
 
     def aggregate_daily_stats(self, records, fallback_date):
         trade_date = next((record.get("trade_date") for record in records if record.get("trade_date")), fallback_date)
-        value_records = [record for record in records if record.get("value") is not None]
+        value_records = [record for record in records if record.get("value_rub") is not None or record.get("value") is not None]
         volume_records = [record for record in records if record.get("volume") is not None]
         trades_records = [record for record in records if record.get("numtrades") is not None]
         last_values = [record["last"] for record in records if record.get("last") is not None]
@@ -356,15 +415,17 @@ class MoexStatsConnector(BaseConnector):
             for record in records
             if record.get("marketprice") is not None
         ]
-        top_record = max(value_records, key=lambda record: record.get("value") or 0, default=None)
+        top_record = max(value_records, key=lambda record: record.get("value_rub") or record.get("value") or 0, default=None)
         top_volume_record = max(volume_records, key=lambda record: record.get("volume") or 0, default=None)
         top_trades_record = max(trades_records, key=lambda record: record.get("numtrades") or 0, default=None)
 
         return {
             "trade_date": trade_date,
             "securities_count": len({record["secid"] for record in records}),
-            "traded_securities_count": sum(1 for record in records if record.get("numtrades") or record.get("value") or record.get("volume")),
-            "total_value": sum(record.get("value") or 0 for record in records),
+            "instruments_count": len({record["secid"] for record in records}),
+            "traded_securities_count": sum(1 for record in records if record.get("numtrades") or record.get("value_rub") or record.get("value") or record.get("volume")),
+            "traded_instruments_count": sum(1 for record in records if record.get("numtrades") or record.get("value_rub") or record.get("value") or record.get("volume")),
+            "total_value": sum(record.get("value_rub") or record.get("value") or 0 for record in records),
             "total_value_usd": sum(record.get("value_usd") or 0 for record in records),
             "total_volume": sum(record.get("volume") or 0 for record in records),
             "total_trades": sum(record.get("numtrades") or 0 for record in records),
@@ -372,7 +433,7 @@ class MoexStatsConnector(BaseConnector):
             "average_marketprice": average(market_prices),
             "top_secid": top_record.get("secid") if top_record else None,
             "top_shortname": top_record.get("shortname") if top_record else None,
-            "top_value": top_record.get("value") if top_record else None,
+            "top_value": (top_record.get("value_rub") or top_record.get("value")) if top_record else None,
             "top_volume_secid": top_volume_record.get("secid") if top_volume_record else None,
             "top_volume_shortname": top_volume_record.get("shortname") if top_volume_record else None,
             "top_volume": top_volume_record.get("volume") if top_volume_record else None,
@@ -383,6 +444,7 @@ class MoexStatsConnector(BaseConnector):
             "raw_data": {
                 "records": records,
                 "aggregation": "one_row_per_trade_date",
+                "note": "snapshot_by_selected_instruments_not_full_market_statistics",
             },
         }
 
@@ -405,6 +467,15 @@ class MoexStatsConnector(BaseConnector):
                 record["_table"] = table_name
                 records.append(record)
         return records
+
+def moex_url_with_query(url, params):
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    for key, value in params.items():
+        if value is None:
+            continue
+        query[str(key)] = str(value)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def value_from_keys(record, keys):

@@ -29,6 +29,15 @@ UPDATE_STATUS_URL = os.getenv("UPDATE_STATUS_URL", "http://127.0.0.1:5000/update
 UPDATE_STATUS_TOKEN = os.getenv("UPDATE_STATUS_TOKEN", "")
 MAX_API_LIMIT = 10000
 MSK = timezone(timedelta(hours=3))
+MANAGER_EMAIL = "manager@redcat.tu"
+DEMO_PLAN = "demo"
+PLAN_DURATIONS_DAYS = {
+    "demo": 7,
+    "basic": 31,
+    "plus": 31,
+}
+AVAILABLE_PLANS = {DEMO_PLAN}
+ACTIVE_SUBSCRIPTION = "active"
 CANONICAL_SIGNAL_CATEGORIES = (
     "Регулирование и комплаенс",
     "Платежи и инфраструктура",
@@ -73,6 +82,9 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), default="user")
     activated = db.Column(db.Boolean, default=False)
+    subscription_plan = db.Column(db.String(40), default="")
+    subscription_status = db.Column(db.String(40), default="inactive")
+    subscription_expires_at = db.Column(db.DateTime, nullable=True)
     avatar_url = db.Column(db.Text, default="")
     bio = db.Column(db.Text, default="")
 
@@ -83,6 +95,9 @@ class User(db.Model):
             "email": self.email,
             "role": self.role,
             "activated": self.activated,
+            "subscription_plan": self.subscription_plan or "",
+            "subscription_status": self.subscription_status or "inactive",
+            "subscription_expires_at": self.subscription_expires_at.isoformat() if self.subscription_expires_at else "",
             "avatar_url": self.avatar_url or "",
             "bio": self.bio or "",
         }
@@ -180,6 +195,7 @@ class NotificationItem(db.Model):
     kind = db.Column(db.String(40), default="signal")
 
     read = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=utcnow)
 
     def to_dict(self):
         return {
@@ -189,6 +205,7 @@ class NotificationItem(db.Model):
             "message": self.message,
             "kind": self.kind,
             "read": self.read,
+            "created_at": self.created_at.isoformat() if self.created_at else "",
         }
 
 
@@ -199,23 +216,19 @@ class SystemState(db.Model):
 
 
 
-RETIRED_ADMIN_EMAILS = {
-    "admin@redcat.local",
-    "lead@redcat.local",
-}
-
 SAMPLE_USERS = [
-    {"full_name": "Manager Red Cat", "email": "manager@redcat.tu", "password": "rqbqerj1543tgjkq", "role": "admin",
-     "activated": True},
-    {"full_name": "Test User", "email": "user@redcat.local", "password": "User12345!", "role": "user",
-     "activated": True},
+    {
+        "full_name": "Manager Red Cat",
+        "email": MANAGER_EMAIL,
+        "password": "rqbqerj1543tgjkq",
+        "role": "admin",
+        "activated": True,
+        "subscription_plan": "manager",
+        "subscription_status": ACTIVE_SUBSCRIPTION,
+    },
 ]
+SAMPLE_PROMOS = []
 
-SAMPLE_PROMOS = [
-    {"code": "REDCAT2026", "description": "Основной код для тестового доступа", "active": True},
-    {"code": "TRNDWCH", "description": "Код для демо-активации", "active": True},
-    {"code": "CASE2026", "description": "Код из кейса", "active": True},
-]
 
 def parse_int(value, default=0):
     try:
@@ -261,6 +274,7 @@ def connect_main_db():
         connection.close()
 
 
+
 def parse_signal_source_ids(value):
     if value is None:
         return []
@@ -302,6 +316,10 @@ def public_draft(value):
 def parse_datetime(value):
     if not value:
         return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
     text = str(value).strip()
     if not text:
         return None
@@ -467,8 +485,11 @@ def list_main_signals_page(
     offset = max(0, parse_int(offset, 0))
     categories = parse_multi_values(category)
     sources = parse_multi_values(source)
-    hotness_values = parse_multi_values(hotness)
-    where = ["(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"]
+    hotness_values = [value for value in parse_multi_values(hotness) if parse_int(value) >= 2]
+    where = [
+        "(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')",
+        "hotness >= 2",
+    ]
     params = []
     if categories:
         where.append(f"category IN ({','.join('?' for _ in categories)})")
@@ -515,8 +536,15 @@ def list_main_signals(limit=100, query=""):
 
 
 def load_update_status_snapshot():
+    status_path = MAIN_DB_PATH.parent / "update_status.json"
     try:
-        response = requests.get(UPDATE_STATUS_URL, timeout=3)
+        if status_path.exists():
+            return json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+
+    try:
+        response = requests.get(UPDATE_STATUS_URL, timeout=1)
         if response.ok:
             return response.json().get("update") or response.json()
     except requests.RequestException:
@@ -540,36 +568,50 @@ def get_main_overview():
     if not MAIN_DB_PATH.exists():
         return overview
 
+    now = utcnow()
+    last_24h_cutoff = now - timedelta(days=1)
+    last_7d_cutoff = now - timedelta(days=7)
+    last_24h_text = last_24h_cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    last_7d_text = last_7d_cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
     with connect_main_db() as connection:
         raw_row = connection.execute("""
-            SELECT
-                COUNT(*) AS observations,
-                SUM(CASE WHEN datetime(COALESCE(parsed_at, published_at)) >= datetime('now', '-1 day') THEN 1 ELSE 0 END) AS last_24h,
-                SUM(CASE WHEN datetime(COALESCE(parsed_at, published_at)) >= datetime('now', '-7 day') THEN 1 ELSE 0 END) AS last_7d
+            SELECT COUNT(*) AS observations
             FROM raw_news
-        """).fetchone()
+            WHERE datetime(COALESCE(parsed_at, published_at)) >= datetime(?)
+        """, (last_7d_text,)).fetchone()
         if raw_row:
             overview["observations"] = raw_row["observations"] or 0
-            overview["processed_last_24h"] = raw_row["last_24h"] or 0
-            overview["processed_last_7d"] = raw_row["last_7d"] or 0
 
-        visible_filter = "(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"
-        row = connection.execute(f"""
+        signal_stats_row = connection.execute("""
             SELECT
-                COUNT(DISTINCT category) AS categories,
-                SUM(CASE WHEN hotness >= 4 THEN 1 ELSE 0 END) AS important
-            FROM signals
-            WHERE {visible_filter}
-        """).fetchone()
-        if row:
-            overview["categories"] = row["categories"] or 0
-            overview["important"] = row["important"] or 0
+                SUM(CASE
+                    WHEN s.hotness > 1
+                     AND datetime(COALESCE(rn.parsed_at, rn.published_at)) >= datetime(?)
+                    THEN 1 ELSE 0
+                END) AS last_24h,
+                SUM(CASE
+                    WHEN s.hotness > 1
+                     AND datetime(COALESCE(rn.parsed_at, rn.published_at)) >= datetime(?)
+                    THEN 1 ELSE 0
+                END) AS last_7d,
+                COUNT(DISTINCT CASE WHEN s.category IS NOT NULL AND TRIM(s.category) != '' THEN s.category END) AS categories,
+                SUM(CASE WHEN s.hotness >= 4 THEN 1 ELSE 0 END) AS important
+            FROM signals s
+            LEFT JOIN raw_news rn ON rn.id = CAST(s.sources AS INTEGER)
+            WHERE (s.draft IS NULL OR s.draft NOT LIKE 'DUBLICATE OF %')
+        """, (last_24h_text, last_7d_text)).fetchone()
+        if signal_stats_row:
+            overview["processed_last_24h"] = signal_stats_row["last_24h"] or 0
+            overview["processed_last_7d"] = signal_stats_row["last_7d"] or 0
+            overview["categories"] = signal_stats_row["categories"] or 0
+            overview["important"] = signal_stats_row["important"] or 0
 
         overview["category_options"] = list(CANONICAL_SIGNAL_CATEGORIES)
 
         source_row = connection.execute("""
-            SELECT COUNT(DISTINCT source_id) AS sources
-            FROM raw_news
+            SELECT COUNT(DISTINCT id) AS sources
+            FROM sources
         """).fetchone()
         if source_row:
             overview["sources"] = source_row["sources"] or 0
@@ -592,7 +634,17 @@ def get_main_overview():
             overview["last_parsed_at"] = to_moscow_iso(parsed_row["last_parsed_at"])
 
     update_status = load_update_status_snapshot()
-    overview["last_update_at"] = to_moscow_iso(update_status.get("finished_at") or update_status.get("started_at"))
+    parser_stage = (update_status.get("stages") or {}).get("parser") or {}
+    overview["last_parsed_at"] = to_moscow_iso(
+        parser_stage.get("started_at")
+        or overview["last_parsed_at"]
+        or update_status.get("started_at")
+    )
+    overview["last_update_at"] = to_moscow_iso(
+        parser_stage.get("finished_at")
+        or update_status.get("finished_at")
+        or update_status.get("started_at")
+    )
     if not overview["last_update_at"]:
         try:
             overview["last_update_at"] = datetime.fromtimestamp(MAIN_DB_PATH.stat().st_mtime, UTC).astimezone(MSK).isoformat()
@@ -645,41 +697,266 @@ def format_number(value, decimals=0, scale=1):
     return text
 
 
-def list_main_market(limit=100, offset=0):
-    if not MAIN_DB_PATH.exists():
-        return {"items": [], "has_more": False}
+def parse_json_list(value):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
-    with connect_main_db() as connection:
-        rows = connection.execute("""
-            SELECT
-                trade_date,
-                securities_count,
-                traded_securities_count,
-                total_value,
-                total_trades,
-                top_secid,
-                top_shortname,
-                top_value
-            FROM moex_daily_stats
-            ORDER BY date(trade_date) DESC, id DESC
-            LIMIT ?
-            OFFSET ?
-        """, (limit + 1, max(0, parse_int(offset, 0)))).fetchall()
+
+def parse_json_dict(value):
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def market_event_to_dict(row):
+    return {
+        "date": row["event_date"],
+        "event_date": row["event_date"],
+        "type": row["event_type"],
+        "event_type": row["event_type"],
+        "severity": row["severity"],
+        "title": row["title"],
+        "description": row["description"],
+        "related_tickers": parse_json_list(row["related_tickers"]),
+        "metrics": parse_json_dict(row["metrics_json"]),
+    }
+
+
+def list_market_events(connection, limit=20, offset=0):
+    rows = connection.execute("""
+        SELECT
+            event_date,
+            event_type,
+            severity,
+            title,
+            description,
+            related_tickers,
+            metrics_json
+        FROM market_events
+        ORDER BY date(event_date) DESC, severity DESC, id DESC
+        LIMIT ? OFFSET ?
+    """, (max(1, int(limit or 20)), max(0, int(offset or 0)))).fetchall()
+    return [market_event_to_dict(row) for row in rows]
+
+
+def list_market_events_for_dates(connection, dates):
+    dates = [date for date in dates if date]
+    if not dates:
+        return []
+    placeholders = ",".join("?" for _ in dates)
+    rows = connection.execute(f"""
+        SELECT
+            event_date,
+            event_type,
+            severity,
+            title,
+            description,
+            related_tickers,
+            metrics_json
+        FROM market_events
+        WHERE event_date IN ({placeholders})
+        ORDER BY date(event_date) DESC, severity DESC, id DESC
+    """, dates).fetchall()
+    return [market_event_to_dict(row) for row in rows]
+
+
+def list_archived_market_event_dates(connection, current_trade_date, limit=3):
+    where = ["event_date IS NOT NULL"]
+    params = []
+    if current_trade_date:
+        where.append("event_date != ?")
+        params.append(current_trade_date)
+    rows = connection.execute(f"""
+        SELECT DISTINCT event_date
+        FROM market_events
+        WHERE {" AND ".join(where)}
+        ORDER BY date(event_date) DESC
+        LIMIT ?
+    """, (*params, max(1, int(limit or 3)))).fetchall()
+    return [row["event_date"] for row in rows]
+
+
+def mark_market_events(events, current_trade_date):
+    for event in events:
+        event_date = event.get("event_date")
+        event["is_current"] = bool(current_trade_date and event_date == current_trade_date)
+        event["current_trade_date"] = current_trade_date
+    return events
+
+
+def list_main_market(limit=100, offset=0, query="", sort_by="value_desc", movement="all"):
+    if not MAIN_DB_PATH.exists():
+        return {"items": [], "has_more": False, "snapshot": None, "events": [], "archived_events": []}
+
+    query = (query or "").strip()
+    movement = (movement or "all").strip()
+    sort_by = (sort_by or "value_desc").strip()
+    order_by_map = {
+        "value_desc": "COALESCE(value_rub, 0) DESC, COALESCE(numtrades, 0) DESC, secid ASC",
+        "trades_desc": "COALESCE(numtrades, 0) DESC, COALESCE(value_rub, 0) DESC, secid ASC",
+        "change_desc": "COALESCE(change_percent, -999999) DESC, COALESCE(value_rub, 0) DESC, secid ASC",
+        "change_asc": "COALESCE(change_percent, 999999) ASC, COALESCE(value_rub, 0) DESC, secid ASC",
+        "price_desc": "COALESCE(last, marketprice, 0) DESC, COALESCE(value_rub, 0) DESC, secid ASC",
+        "ticker_asc": "secid ASC",
+    }
+    order_by = order_by_map.get(sort_by, order_by_map["value_desc"])
+
+    try:
+        with connect_main_db() as connection:
+            latest_row = connection.execute("""
+                SELECT trade_date
+                FROM moex_instruments_daily
+                ORDER BY date(trade_date) DESC, fetched_at DESC, id DESC
+                LIMIT 1
+            """).fetchone()
+            latest_trade_date = latest_row["trade_date"] if latest_row else None
+
+            market_where = ["trade_date = ?"]
+            market_params = [latest_trade_date]
+            if query:
+                like = f"%{query}%"
+                market_where.append("(secid LIKE ? OR shortname LIKE ? OR secname LIKE ?)")
+                market_params.extend([like, like, like])
+            if movement == "gainers":
+                market_where.append("COALESCE(change_percent, 0) > 0")
+            elif movement == "losers":
+                market_where.append("COALESCE(change_percent, 0) < 0")
+            elif movement == "active":
+                market_where.append("(COALESCE(value_rub, 0) > 0 OR COALESCE(numtrades, 0) > 0)")
+            elif movement == "strong":
+                market_where.append("ABS(COALESCE(change_percent, 0)) >= 3")
+            where_sql = " AND ".join(market_where)
+
+            rows = connection.execute(f"""
+                SELECT
+                    trade_date,
+                    secid,
+                    boardid,
+                    shortname,
+                    secname,
+                    last,
+                    marketprice,
+                    change_percent,
+                    value_rub,
+                    volume,
+                    numtrades,
+                    fetched_at
+                FROM moex_instruments_daily
+                WHERE {where_sql}
+                ORDER BY {order_by}
+                LIMIT ? OFFSET ?
+            """, (*market_params, limit + 1, max(0, parse_int(offset, 0)))).fetchall() if latest_trade_date else []
+
+            snapshot_row = connection.execute("""
+                SELECT
+                    trade_date,
+                    COALESCE(instruments_count, securities_count) AS instruments_count,
+                    COALESCE(traded_instruments_count, traded_securities_count) AS traded_instruments_count,
+                    total_value,
+                    total_trades,
+                    top_secid,
+                    top_shortname,
+                    top_value,
+                    fetched_at
+                FROM moex_daily_stats
+                ORDER BY date(trade_date) DESC, id DESC
+                LIMIT 1
+            """).fetchone()
+
+            leader_gain_row = None
+            leader_drop_row = None
+            most_traded_row = None
+            if latest_trade_date:
+                leader_gain_row = connection.execute("""
+                    SELECT secid, shortname, change_percent
+                    FROM moex_instruments_daily
+                    WHERE trade_date = ?
+                      AND change_percent IS NOT NULL
+                    ORDER BY change_percent DESC
+                    LIMIT 1
+                """, (latest_trade_date,)).fetchone()
+                leader_drop_row = connection.execute("""
+                    SELECT secid, shortname, change_percent
+                    FROM moex_instruments_daily
+                    WHERE trade_date = ?
+                      AND change_percent IS NOT NULL
+                    ORDER BY change_percent ASC
+                    LIMIT 1
+                """, (latest_trade_date,)).fetchone()
+                most_traded_row = connection.execute("""
+                    SELECT secid, shortname, numtrades
+                    FROM moex_instruments_daily
+                    WHERE trade_date = ?
+                      AND numtrades IS NOT NULL
+                    ORDER BY numtrades DESC
+                    LIMIT 1
+                """, (latest_trade_date,)).fetchone()
+
+            current_event_rows = list_market_events_for_dates(connection, [latest_trade_date])
+            archived_event_dates = list_archived_market_event_dates(connection, latest_trade_date, limit=3)
+            archived_event_rows = list_market_events_for_dates(connection, archived_event_dates)
+    except sqlite3.OperationalError:
+        return {"items": [], "has_more": False, "snapshot": None, "events": [], "archived_events": []}
 
     items = [
         {
             "date": row["trade_date"],
-            "sec_count": format_number(row["securities_count"] or row["traded_securities_count"]),
-            "total_value": format_number(row["total_value"], decimals=2),
-            "trades": format_number(row["total_trades"]),
-            "top_ticker": row["top_secid"] or row["top_shortname"],
-            "top_value": format_number(row["top_value"], decimals=2),
+            "secid": row["secid"],
+            "boardid": row["boardid"],
+            "shortname": row["shortname"] or row["secid"],
+            "secname": row["secname"] or "",
+            "last": row["last"],
+            "marketprice": row["marketprice"],
+            "change_percent": row["change_percent"],
+            "value_rub": row["value_rub"],
+            "volume": row["volume"],
+            "trades": row["numtrades"],
+            "fetched_at": row["fetched_at"],
         }
         for row in rows[:limit]
     ]
+
+    snapshot = None
+    if snapshot_row:
+        snapshot = {
+            "trade_date": snapshot_row["trade_date"],
+            "instruments_count": snapshot_row["instruments_count"],
+            "traded_instruments_count": snapshot_row["traded_instruments_count"],
+            "total_value": snapshot_row["total_value"],
+            "total_trades": snapshot_row["total_trades"],
+            "top_value_ticker": snapshot_row["top_secid"] or snapshot_row["top_shortname"],
+            "top_value": snapshot_row["top_value"],
+            "fetched_at": snapshot_row["fetched_at"],
+        }
+        if leader_gain_row:
+            snapshot["leader_gain_ticker"] = leader_gain_row["secid"] or leader_gain_row["shortname"]
+            snapshot["leader_gain_percent"] = leader_gain_row["change_percent"]
+        if leader_drop_row:
+            snapshot["leader_drop_ticker"] = leader_drop_row["secid"] or leader_drop_row["shortname"]
+            snapshot["leader_drop_percent"] = leader_drop_row["change_percent"]
+        if most_traded_row:
+            snapshot["most_traded_ticker"] = most_traded_row["secid"] or most_traded_row["shortname"]
+            snapshot["most_traded_count"] = most_traded_row["numtrades"]
+
+    current_trade_date = snapshot["trade_date"] if snapshot else latest_trade_date
+    current_events = mark_market_events(current_event_rows, current_trade_date)
+    archived_events = mark_market_events(archived_event_rows, current_trade_date)
+
     return {
         "items": items,
         "has_more": len(rows) > limit,
+        "snapshot": snapshot,
+        "events": current_events,
+        "archived_events": archived_events,
     }
 
 
@@ -704,7 +981,11 @@ def get_current_user():
     email = get_jwt_identity()
     if not email:
         return None
-    return User.query.filter_by(email=email).first()
+    user = User.query.filter_by(email=email).first()
+    refresh_subscription_status(user)
+    if user and db.session.is_modified(user):
+        db.session.commit()
+    return user
 
 
 def admin_only(view):
@@ -712,7 +993,7 @@ def admin_only(view):
     @jwt_required()
     def wrapper(*args, **kwargs):
         user = get_current_user()
-        if not user or user.role != "admin":
+        if not user or user.role != "admin" or user.email != MANAGER_EMAIL:
             REQUEST_METRICS["admin_denied_total"] += 1
             return jsonify({"error": "Только для админа"}), 403
         return view(*args, **kwargs)
@@ -723,24 +1004,64 @@ def admin_only(view):
 def ensure_state():
     state = SystemState.query.first()
     if not state:
-        state = SystemState(last_signal_check=utcnow() - timedelta(days=365))
+        state = SystemState(last_signal_check=utcnow())
         db.session.add(state)
         db.session.commit()
     return state
 
 
-def remove_retired_admin_users():
-    users = User.query.filter(User.email.in_(RETIRED_ADMIN_EMAILS)).all()
-    if not users:
-        return
+def refresh_subscription_status(user: User):
+    if not user:
+        return None
+    if user.email == MANAGER_EMAIL:
+        user.role = "admin"
+        user.activated = True
+        user.subscription_plan = user.subscription_plan or "manager"
+        user.subscription_status = ACTIVE_SUBSCRIPTION
+        return user
+    if user.subscription_status == ACTIVE_SUBSCRIPTION and user.subscription_expires_at:
+        expires_at = parse_datetime(user.subscription_expires_at)
+        if expires_at and expires_at <= utcnow():
+            user.subscription_status = "expired"
+            user.activated = False
+    return user
 
-    user_ids = [user.id for user in users]
-    Favorite.query.filter(Favorite.user_id.in_(user_ids)).delete(synchronize_session=False)
-    NotificationSetting.query.filter(NotificationSetting.user_id.in_(user_ids)).delete(synchronize_session=False)
-    NotificationItem.query.filter(NotificationItem.user_id.in_(user_ids)).delete(synchronize_session=False)
-    User.query.filter(User.id.in_(user_ids)).delete(synchronize_session=False)
-    db.session.commit()
 
+def activate_subscription(user: User, plan: str):
+    plan = (plan or "").strip().lower()
+    if plan not in AVAILABLE_PLANS:
+        return False, "На данный момент не доступна"
+    if plan == DEMO_PLAN and user.subscription_plan == DEMO_PLAN:
+        return False, "Демо-доступ нельзя подключить повторно"
+
+    user.activated = True
+    user.subscription_plan = plan
+    user.subscription_status = ACTIVE_SUBSCRIPTION
+    user.subscription_expires_at = utcnow() + timedelta(days=PLAN_DURATIONS_DAYS[plan])
+    return True, ""
+
+
+def ensure_frontend_schema():
+    with db.engine.begin() as connection:
+        user_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(user)").fetchall()
+        }
+        if "subscription_plan" not in user_columns:
+            connection.exec_driver_sql("ALTER TABLE user ADD COLUMN subscription_plan TEXT DEFAULT ''")
+        if "subscription_status" not in user_columns:
+            connection.exec_driver_sql("ALTER TABLE user ADD COLUMN subscription_status TEXT DEFAULT 'inactive'")
+        if "subscription_expires_at" not in user_columns:
+            connection.exec_driver_sql("ALTER TABLE user ADD COLUMN subscription_expires_at DATETIME")
+
+        notification_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(notification_item)").fetchall()
+        }
+        if "created_at" not in notification_columns:
+            connection.exec_driver_sql("ALTER TABLE notification_item ADD COLUMN created_at DATETIME")
+        if "read" not in notification_columns:
+            connection.exec_driver_sql("ALTER TABLE notification_item ADD COLUMN read BOOLEAN DEFAULT 0")
 
 def upsert_seed_users():
     for item in SAMPLE_USERS:
@@ -752,19 +1073,22 @@ def upsert_seed_users():
         user.password_hash = generate_password_hash(item["password"])
         user.role = item["role"]
         user.activated = item["activated"]
+        user.subscription_plan = item.get("subscription_plan", DEMO_PLAN)
+        user.subscription_status = item.get("subscription_status", ACTIVE_SUBSCRIPTION)
+        user.subscription_expires_at = item.get("subscription_expires_at")
     db.session.commit()
 
 
 def seed_data():
-    remove_retired_admin_users()
     upsert_seed_users()
+    PromoCode.query.delete()
+    db.session.commit()
 
-    if not PromoCode.query.first():
-        for item in SAMPLE_PROMOS:
-            db.session.add(PromoCode(**item))
+    state = ensure_state()
+    last_signal_check = parse_datetime(state.last_signal_check)
+    if not last_signal_check or last_signal_check < utcnow() - timedelta(days=7):
+        state.last_signal_check = utcnow()
         db.session.commit()
-
-    ensure_state()
 
 
 def signal_value(signal, key, default=None):
@@ -784,19 +1108,16 @@ def signal_matches_rule(signal, rule: NotificationSetting) -> bool:
 
 
 def rebuild_notifications_for_user(user: User):
-    state = ensure_state()
-    last_time = state.last_signal_check or (utcnow() - timedelta(days=365))
-    if last_time.tzinfo is None:
-        last_time = last_time.replace(tzinfo=UTC)
-
-    new_signals = []
-    for signal in reversed(list_main_signals(limit=500)):
-        event_time = parse_datetime(signal.get("published_at") or signal.get("created_at"))
-        if event_time and event_time > last_time:
-            new_signals.append(signal)
-
-    if not new_signals:
+    if not user or not user.activated:
         return []
+
+    state = ensure_state()
+    cutoff = parse_datetime(state.last_signal_check) or utcnow()
+    new_signals = []
+    for signal in list_main_signals(limit=MAX_API_LIMIT):
+        event_time = parse_datetime(signal.get("created_at") or signal.get("published_at"))
+        if event_time and event_time > cutoff:
+            new_signals.append(signal)
 
     rules = NotificationSetting.query.filter_by(user_id=user.id, active=True).all()
     created_items = []
@@ -818,19 +1139,27 @@ def rebuild_notifications_for_user(user: User):
                     title=signal.get("headline") or "",
                     message=signal.get("summary") or "",
                     kind="signal",
+                    read=False,
+                    created_at=utcnow(),
                 )
                 db.session.add(item)
                 created_items.append(item)
 
-    newest_time = utcnow()
-    state.last_signal_check = newest_time
     db.session.commit()
     return created_items
 
 
 def rebuild_notifications_for_all_users():
+    state = ensure_state()
+    before = parse_datetime(state.last_signal_check) or utcnow()
+    max_seen = before
     for user in User.query.all():
-        rebuild_notifications_for_user(user)
+        for item in rebuild_notifications_for_user(user):
+            item_time = parse_datetime(item.created_at)
+            if item_time and item_time > max_seen:
+                max_seen = item_time
+    state.last_signal_check = max(utcnow(), max_seen)
+    db.session.commit()
 
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
@@ -895,6 +1224,9 @@ def create_app(test_config=None):
     @app.post("/api/update")
     @jwt_required()
     def run_update():
+        user = get_current_user()
+        if not user or user.subscription_status != ACTIVE_SUBSCRIPTION:
+            return jsonify({"error": "Нужна активная подписка"}), 403
         return proxy_backend_update()
 
     @app.post("/api/admin/update")
@@ -988,7 +1320,32 @@ def create_app(test_config=None):
     @app.get("/api/market")
     def get_market():
         limit = normalize_api_limit(request.args.get("limit"), 50)
-        return jsonify(list_main_market(limit=limit, offset=request.args.get("offset")))
+        return jsonify(list_main_market(
+            limit=limit,
+            offset=request.args.get("offset"),
+            query=request.args.get("q") or "",
+            sort_by=request.args.get("sort") or "value_desc",
+            movement=request.args.get("movement") or "all",
+        ))
+
+    @app.get("/api/market/events")
+    def get_market_events_endpoint():
+        limit = normalize_api_limit(request.args.get("limit"), 20, maximum=100)
+        offset = max(0, parse_int(request.args.get("offset"), 0))
+
+        if not MAIN_DB_PATH.exists():
+            return jsonify({"items": [], "has_more": False})
+
+        try:
+            with connect_main_db() as connection:
+                events = list_market_events(connection, limit=limit + 1, offset=offset)
+        except sqlite3.OperationalError:
+            return jsonify({"items": [], "has_more": False})
+
+        return jsonify({
+            "items": events[:limit],
+            "has_more": len(events) > limit,
+        })
 
     @app.get("/api/overview")
     def get_overview():
@@ -1004,7 +1361,7 @@ def create_app(test_config=None):
             return jsonify({"error": "Некорректный формат почты"}), 400
 
         if not full_name or not email or not password:
-            return jsonify({"error": "Заполни ФИО, почту и пароль"}), 400
+            return jsonify({"error": "Заполни логин, почту и пароль"}), 400
 
         existing = User.query.filter_by(email=email).first()
         if existing:
@@ -1022,6 +1379,8 @@ def create_app(test_config=None):
             password_hash=generate_password_hash(password),
             role="user",
             activated=False,
+            subscription_plan="",
+            subscription_status="inactive",
         )
         db.session.add(user)
         db.session.commit()
@@ -1031,25 +1390,24 @@ def create_app(test_config=None):
     def activate():
         data = request.get_json() or {}
         email = (data.get("email") or "").strip().lower()
-        promo_code = (data.get("promo_code") or "").strip().upper()
+        plan = (data.get("plan") or data.get("subscription_plan") or "").strip().lower()
 
         user = User.query.filter_by(email=email).first()
         if not user:
             return jsonify({"error": "Пользователь не найден"}), 404
+
         if user.activated:
+            refresh_subscription_status(user)
+            if db.session.is_modified(user):
+                db.session.commit()
             token = create_access_token(identity=user.email)
             return jsonify({"token": token, "user": user.to_dict(), "message": "Аккаунт уже активирован"})
 
-        if not promo_code:
-            return jsonify({"error": "Введите код активации"}), 400
+        ok, message = activate_subscription(user, plan)
+        if not ok:
+            return jsonify({"error": message}), 400
 
-        promo_ok = PromoCode.query.filter_by(code=promo_code, active=True).first() is not None
-        if not promo_ok:
-            return jsonify({"error": "Неверный код активации"}), 400
-
-        user.activated = True
         db.session.commit()
-
         token = create_access_token(identity=user.email)
         return jsonify({"token": token, "user": user.to_dict(), "message": "Аккаунт активирован"})
 
@@ -1067,6 +1425,10 @@ def create_app(test_config=None):
         if not check_password_hash(user.password_hash, password):
             REQUEST_METRICS["auth_denied_total"] += 1
             return jsonify({"error": "Неверный пароль"}), 401
+
+        refresh_subscription_status(user)
+        if db.session.is_modified(user):
+            db.session.commit()
 
         if not user.activated:
             REQUEST_METRICS["auth_denied_total"] += 1
@@ -1188,13 +1550,28 @@ def create_app(test_config=None):
     def get_notifications():
         user = get_current_user()
         items = NotificationItem.query.filter_by(user_id=user.id).order_by(NotificationItem.id.desc()).all()
-        return jsonify({"items": [item.to_dict() for item in items]})
+        unread_count = NotificationItem.query.filter_by(user_id=user.id, read=False).count()
+        return jsonify({"items": [item.to_dict() for item in items], "unread_count": unread_count})
+
+    @app.post("/api/notifications/<int:item_id>/read")
+    @jwt_required()
+    def read_notification(item_id):
+        user = get_current_user()
+        item = NotificationItem.query.filter_by(user_id=user.id, id=item_id).first()
+        if not item:
+            return jsonify({"error": "Уведомление не найдено"}), 404
+        item.read = True
+        db.session.commit()
+        unread_count = NotificationItem.query.filter_by(user_id=user.id, read=False).count()
+        return jsonify({"message": "Уведомление прочитано", "unread_count": unread_count})
 
     @app.delete("/api/notifications/clear")
     @jwt_required()
     def clear_notifications():
         user = get_current_user()
         NotificationItem.query.filter_by(user_id=user.id).delete()
+        state = ensure_state()
+        state.last_signal_check = utcnow()
         db.session.commit()
         return jsonify({"message": "Уведомления очищены"})
 
@@ -1202,7 +1579,7 @@ def create_app(test_config=None):
     @jwt_required()
     def rebuild_notifications():
         user = get_current_user()
-        rebuild_notifications_for_user(user)
+        rebuild_notifications_for_all_users()
         items = NotificationItem.query.filter_by(user_id=user.id).order_by(NotificationItem.id.desc()).all()
         return jsonify({"message": "Уведомления обновлены", "items": [item.to_dict() for item in items]})
 
@@ -1216,6 +1593,10 @@ def create_app(test_config=None):
     @admin_only
     def admin_users():
         users = User.query.order_by(User.id.asc()).all()
+        for user in users:
+            refresh_subscription_status(user)
+        if any(db.session.is_modified(user) for user in users):
+            db.session.commit()
         return jsonify({"items": [user.to_dict() for user in users]})
 
     @app.put("/api/admin/users/<int:user_id>")
@@ -1228,7 +1609,9 @@ def create_app(test_config=None):
 
         full_name = (data.get("full_name") or user.full_name).strip()
         email = (data.get("email") or user.email).strip().lower()
-        role = (data.get("role") or user.role).strip()
+        if user.email == MANAGER_EMAIL and email != MANAGER_EMAIL:
+            return jsonify({"error": "Email менеджера менять нельзя"}), 400
+        role = "admin" if email == MANAGER_EMAIL else "user"
 
         if email != user.email:
             exists = User.query.filter(User.email == email, User.id != user.id).first()
@@ -1240,15 +1623,48 @@ def create_app(test_config=None):
         user.role = role
         if "activated" in data:
             user.activated = bool(data.get("activated"))
+        if "subscription_plan" in data:
+            user.subscription_plan = (data.get("subscription_plan") or "").strip()
+        if "subscription_status" in data:
+            user.subscription_status = (data.get("subscription_status") or "").strip() or "inactive"
+            user.activated = user.subscription_status == ACTIVE_SUBSCRIPTION
 
         db.session.commit()
         return jsonify({"message": "Пользователь обновлён", "user": user.to_dict()})
 
+    @app.get("/api/admin/subscriptions")
+    @admin_only
+    def admin_subscriptions():
+        users = User.query.order_by(User.id.asc()).all()
+        return jsonify({"items": [user.to_dict() for user in users]})
+
+    @app.put("/api/admin/subscriptions/<int:user_id>")
+    @admin_only
+    def admin_update_subscription(user_id):
+        data = request.get_json() or {}
+        user = db.session.get(User, user_id)
+        if not user:
+            return jsonify({"error": "Пользователь не найден"}), 404
+
+        if user.email == MANAGER_EMAIL:
+            return jsonify({"error": "Подписку менеджера менять нельзя"}), 400
+
+        status = (data.get("subscription_status") or "inactive").strip()
+        plan = (data.get("subscription_plan") or "").strip()
+        user.subscription_plan = plan
+        user.subscription_status = status
+        user.activated = status == ACTIVE_SUBSCRIPTION
+        if status == ACTIVE_SUBSCRIPTION and plan in PLAN_DURATIONS_DAYS:
+            user.subscription_expires_at = utcnow() + timedelta(days=PLAN_DURATIONS_DAYS[plan])
+        if status != ACTIVE_SUBSCRIPTION:
+            user.subscription_expires_at = None
+        db.session.commit()
+        return jsonify({"message": "Подписка обновлена", "user": user.to_dict()})
+
     @app.get("/api/admin/promo-codes")
     @admin_only
     def admin_promo_codes():
-        items = PromoCode.query.order_by(PromoCode.id.asc()).all()
-        return jsonify({"items": [item.to_dict() for item in items]})
+        return jsonify({"items": []})
 
     @app.post("/api/admin/promo-codes")
     @admin_only
@@ -1291,6 +1707,7 @@ def create_app(test_config=None):
 
     with app.app_context():
         db.create_all()
+        ensure_frontend_schema()
         seed_data()
 
     return app

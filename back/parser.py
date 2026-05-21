@@ -7,11 +7,29 @@ import time
 try:
     from back.connectors import get_connector
     from back.connectors.base import BaseConnector, DEFAULT_LOOKBACK_DAYS, DEFAULT_USER_AGENT
-    from back.init_db import DB_PATH, connect_db, init_db
+    from back.init_db import (
+        DB_PATH,
+        connect_db,
+        init_db,
+        detect_market_anomalies,
+        insert_market_event,
+        insert_moex_daily_stat,
+        insert_moex_instrument_daily,
+        update_moex_fetch_status,
+    )
 except ModuleNotFoundError:
     from connectors import get_connector
     from connectors.base import BaseConnector, DEFAULT_LOOKBACK_DAYS, DEFAULT_USER_AGENT
-    from init_db import DB_PATH, connect_db, init_db
+    from init_db import (
+        DB_PATH,
+        connect_db,
+        init_db,
+        detect_market_anomalies,
+        insert_market_event,
+        insert_moex_daily_stat,
+        insert_moex_instrument_daily,
+        update_moex_fetch_status,
+    )
 
 
 MIN_TEXT_LENGTH = 80
@@ -90,32 +108,34 @@ def parse_source(db, source):
     started_at = time.monotonic()
     config = load_parser_config(source["parser_config"])
     config["_existing_urls"] = load_existing_urls(db, source["id"])
+
     connector_name = config.get("connector") or source["source_type"]
     connector = get_connector(connector_name)
+
+    if connector_name == "moex":
+        return parse_moex_source(db, source, connector, config, started_at)
+
     items = connector.parse(source, config)
-    market_stats = []
-    if hasattr(connector, "parse_market_stats"):
-        market_stats = connector.parse_market_stats(source, config)
 
     created = 0
     duplicates = 0
     skipped_quality = 0
+
     for item in items:
         normalized_item = normalize_news_item(item, config)
         if not normalized_item:
             skipped_quality += 1
             continue
+
         if insert_raw_news(db, source["id"], normalized_item):
             created += 1
         else:
             duplicates += 1
 
-    market_stats_created = 0
-    for stat in market_stats:
-        if insert_moex_daily_stat(db, source["id"], stat):
-            market_stats_created += 1
-
-    db.execute("UPDATE sources SET last_parsed_at = CURRENT_TIMESTAMP WHERE id = ?", (source["id"],))
+    db.execute(
+        "UPDATE sources SET last_parsed_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (source["id"],),
+    )
     db.commit()
 
     return {
@@ -127,13 +147,99 @@ def parse_source(db, source):
         "duration_seconds": round(time.monotonic() - started_at, 3),
         "found": len(items),
         "created": created,
-        "market_stats_found": len(market_stats),
-        "market_stats_created": market_stats_created,
+        "market_stats_found": 0,
+        "market_stats_created": 0,
+        "moex_instruments_found": 0,
+        "moex_instruments_created": 0,
+        "market_events_found": 0,
+        "market_events_created": 0,
         "duplicates": duplicates,
         "skipped": duplicates + skipped_quality,
         "skipped_quality": skipped_quality,
         "errors": 0,
-        "empty": len(items) == 0 and len(market_stats) == 0,
+        "empty": len(items) == 0,
+    }
+
+def parse_moex_source(db, source, connector, config, started_at):
+    market_instruments = []
+
+    if hasattr(connector, "parse_market_instruments"):
+        market_instruments = connector.parse_market_instruments(source, config)
+
+    market_stats = []
+    if market_instruments and hasattr(connector, "aggregate_daily_stats"):
+        fallback_date = market_instruments[0].get("trade_date")
+        market_stats = [
+            connector.aggregate_daily_stats(market_instruments, fallback_date)
+        ]
+
+    moex_instruments_created = 0
+    market_stats_created = 0
+    market_events_created = 0
+    anomalies = []
+
+    for instr in market_instruments:
+        if insert_moex_instrument_daily(
+            db,
+            trade_date=instr.get("trade_date"),
+            secid=instr.get("secid"),
+            boardid=instr.get("boardid"),
+            shortname=instr.get("shortname"),
+            secname=instr.get("secname"),
+            last=instr.get("last"),
+            open_price=instr.get("open"),
+            high=instr.get("high"),
+            low=instr.get("low"),
+            marketprice=instr.get("marketprice"),
+            value_rub=instr.get("value_rub", instr.get("value")),
+            value_usd=instr.get("value_usd"),
+            volume=instr.get("volume"),
+            numtrades=instr.get("numtrades"),
+            change_percent=instr.get("change_percent"),
+            raw_data=instr.get("raw_data"),
+        ):
+            moex_instruments_created += 1
+
+    for stat in market_stats:
+        stat["source_id"] = source["id"]
+        if insert_moex_daily_stat(db, source["id"], stat):
+            market_stats_created += 1
+
+    if market_stats:
+        trade_date = market_stats[0].get("trade_date")
+
+        anomalies = detect_market_anomalies(db, trade_date)
+        for anomaly in anomalies:
+            if insert_market_event(db, anomaly):
+                market_events_created += 1
+
+    update_moex_fetch_status(db, success=True)
+    db.execute(
+        "UPDATE sources SET last_parsed_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (source["id"],),
+    )
+    db.commit()
+
+    return {
+        "source_id": source["id"],
+        "source_name": source["name"],
+        "source_url": source["url"],
+        "source_type": source["source_type"],
+        "connector": "moex",
+        "duration_seconds": round(time.monotonic() - started_at, 3),
+        "found": 0,
+        "created": 0,
+        "market_stats_found": len(market_stats),
+        "market_stats_created": market_stats_created,
+        "moex_instruments_found": len(market_instruments),
+        "moex_instruments_created": moex_instruments_created,
+        "market_events_found": len(anomalies) if market_stats else 0,
+        "market_events_created": market_events_created,
+        "duplicates": 0,
+        "skipped": 0,
+        "skipped_quality": 0,
+        "errors": 0,
+        "empty": len(market_instruments) == 0 and len(market_stats) == 0,
     }
 
 
@@ -164,6 +270,10 @@ def aggregate_parser_results(results):
         "sources": len(results),
         "created": sum(item["created"] for item in results),
         "market_stats_created": sum(item.get("market_stats_created", 0) for item in results),
+        "moex_instruments_found": sum(item.get("moex_instruments_found", 0) for item in results),
+        "moex_instruments_created": sum(item.get("moex_instruments_created", 0) for item in results),
+        "market_events_found": sum(item.get("market_events_found", 0) for item in results),
+        "market_events_created": sum(item.get("market_events_created", 0) for item in results),
         "duplicates": duplicates,
         "skipped": duplicates + skipped_quality,
         "skipped_quality": skipped_quality,
@@ -200,6 +310,10 @@ def source_error_result(source, error):
         "created": 0,
         "market_stats_found": 0,
         "market_stats_created": 0,
+        "moex_instruments_found": 0,
+        "moex_instruments_created": 0,
+        "market_events_found": 0,
+        "market_events_created": 0,
         "duplicates": 0,
         "skipped": 0,
         "errors": 1,
@@ -213,17 +327,23 @@ def format_source_summary(result):
             f"{result.get('source_name')} ({result.get('source_url')}): "
             f"ошибка: {result.get('error')}"
         )
+
+    if result.get("connector") == "moex":
+        return (
+            f"{result.get('source_name')} ({result.get('source_url')}): "
+            f"инструментов найдено {result.get('moex_instruments_found', 0)}, "
+            f"инструментов сохранено {result.get('moex_instruments_created', 0)}, "
+            f"snapshot сохранено {result.get('market_stats_created', 0)}, "
+            f"аномалий найдено {result.get('market_events_found', 0)}, "
+            f"аномалий сохранено {result.get('market_events_created', 0)}"
+        )
+
     if result.get("found", 0) == 0:
-        if result.get("market_stats_found", 0):
-            return (
-                f"{result.get('source_name')} ({result.get('source_url')}): "
-                f"статистики найдено {result.get('market_stats_found', 0)}, "
-                f"сохранено {result.get('market_stats_created', 0)}"
-            )
         return (
             f"{result.get('source_name')} ({result.get('source_url')}): "
             "ничего не найдено"
         )
+
     return (
         f"{result.get('source_name')} ({result.get('source_url')}): "
         f"найдено {result.get('found', 0)}, "
@@ -420,88 +540,6 @@ def insert_raw_news(db, source_id, item):
     if existing is not None:
         return None
     return cursor.lastrowid
-
-
-def insert_moex_daily_stat(db, source_id, stat):
-    existing = db.execute("""
-        SELECT id
-        FROM moex_daily_stats
-        WHERE source_id = ? AND trade_date = ?
-    """, (
-        source_id,
-        stat.get("trade_date"),
-    )).fetchone()
-
-    db.execute("""
-        INSERT INTO moex_daily_stats (
-            source_id,
-            trade_date,
-            securities_count,
-            traded_securities_count,
-            total_value,
-            total_value_usd,
-            total_volume,
-            total_trades,
-            average_last,
-            average_marketprice,
-            top_secid,
-            top_shortname,
-            top_value,
-            top_volume_secid,
-            top_volume_shortname,
-            top_volume,
-            top_trades_secid,
-            top_trades_shortname,
-            top_trades,
-            moex_systime,
-            raw_data
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_id, trade_date) DO UPDATE SET
-            securities_count = excluded.securities_count,
-            traded_securities_count = excluded.traded_securities_count,
-            total_value = excluded.total_value,
-            total_value_usd = excluded.total_value_usd,
-            total_volume = excluded.total_volume,
-            total_trades = excluded.total_trades,
-            average_last = excluded.average_last,
-            average_marketprice = excluded.average_marketprice,
-            top_secid = excluded.top_secid,
-            top_shortname = excluded.top_shortname,
-            top_value = excluded.top_value,
-            top_volume_secid = excluded.top_volume_secid,
-            top_volume_shortname = excluded.top_volume_shortname,
-            top_volume = excluded.top_volume,
-            top_trades_secid = excluded.top_trades_secid,
-            top_trades_shortname = excluded.top_trades_shortname,
-            top_trades = excluded.top_trades,
-            moex_systime = excluded.moex_systime,
-            raw_data = excluded.raw_data,
-            fetched_at = CURRENT_TIMESTAMP
-    """, (
-        source_id,
-        stat.get("trade_date"),
-        stat.get("securities_count"),
-        stat.get("traded_securities_count"),
-        stat.get("total_value"),
-        stat.get("total_value_usd"),
-        stat.get("total_volume"),
-        stat.get("total_trades"),
-        stat.get("average_last"),
-        stat.get("average_marketprice"),
-        stat.get("top_secid"),
-        stat.get("top_shortname"),
-        stat.get("top_value"),
-        stat.get("top_volume_secid"),
-        stat.get("top_volume_shortname"),
-        stat.get("top_volume"),
-        stat.get("top_trades_secid"),
-        stat.get("top_trades_shortname"),
-        stat.get("top_trades"),
-        stat.get("moex_systime"),
-        json.dumps(stat.get("raw_data") or stat, ensure_ascii=False),
-    ))
-    return existing is None
 
 
 def make_content_hash(title, text):

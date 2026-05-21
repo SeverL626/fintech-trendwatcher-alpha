@@ -4,9 +4,7 @@
 
  ## Admin access + /update/status
 
-**Promo codes:** REDCAT2026
-
-- manager@redcat.ru
+- manager@redcat.tu
 - rqbqerj1543tgjkq
 
 > https://redcat-news.ru/update/status?token=rqbqerj1543tgjkq
@@ -157,7 +155,7 @@ server: /opt/myapp/data/app.db
 | `securities_count`, `traded_securities_count` | Количество инструментов |
 | `total_value`, `total_value_usd`, `total_volume`, `total_trades` | Обороты, объёмы, сделки |
 | `average_last`, `average_marketprice` | Средние цены |
-| `top_*` | Инструменты-лидеры по обороту, объёму и сделкам |
+| `top_*` | Лидеры по обороту, объёму и сделкам |
 | `moex_systime`, `raw_data`, `fetched_at` | Служебные данные |
 
 ### Runtime Files

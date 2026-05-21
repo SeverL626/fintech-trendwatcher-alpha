@@ -178,6 +178,25 @@ function compactDate(value) {
   })
 }
 
+function planLabel(plan) {
+  const labels = {
+    demo: 'Демо-доступ',
+    basic: 'Basic',
+    plus: 'Plus',
+    manager: 'Manager',
+  }
+  return labels[plan] || 'Без подписки'
+}
+
+function subscriptionStatusLabel(status) {
+  const labels = {
+    active: 'Активна',
+    inactive: 'Не активирована',
+    expired: 'Истекла',
+  }
+  return labels[status] || status || 'Не активирована'
+}
+
 function hotnessClass(value) {
   return `hotness-${Number(value) || 0}`
 }
@@ -273,62 +292,268 @@ function Market({ market }) {
   const [items, setItems] = useState(Array.isArray(market) ? market : (market?.items || []))
   const [hasMore, setHasMore] = useState(Boolean(market?.has_more))
   const [loading, setLoading] = useState(false)
+  const [snapshot, setSnapshot] = useState(market?.snapshot)
+  const [events, setEvents] = useState(market?.events || [])
+  const [archivedEvents, setArchivedEvents] = useState(market?.archived_events || [])
+  const [showArchivedEvents, setShowArchivedEvents] = useState(false)
+  const [searchInput, setSearchInput] = useState('')
+  const [query, setQuery] = useState('')
+  const [sortBy, setSortBy] = useState('value_desc')
+  const [movement, setMovement] = useState('all')
+  const [error, setError] = useState('')
 
   useEffect(() => {
     setItems(Array.isArray(market) ? market : (market?.items || []))
     setHasMore(Boolean(market?.has_more))
+    setSnapshot(market?.snapshot)
+    setEvents(market?.events || [])
+    setArchivedEvents(market?.archived_events || [])
   }, [market])
 
-  const loadMore = async () => {
+  const buildMarketPath = (offset) => {
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+      sort: sortBy,
+      movement,
+    })
+    if (query.trim()) params.set('q', query.trim())
+    return `/api/market?${params.toString()}`
+  }
+
+  const loadMarket = async (reset = false) => {
+    const offset = reset ? 0 : items.length
     setLoading(true)
+    setError('')
+    if (reset) {
+      setItems([])
+      setHasMore(false)
+    }
     try {
-      const data = await apiFetch(`/api/market?limit=${PAGE_SIZE}&offset=${items.length}`)
-      setItems((prev) => [...prev, ...(data.items || [])])
+      const data = await apiFetch(buildMarketPath(offset))
+      setItems((prev) => reset ? (data.items || []) : [...prev, ...(data.items || [])])
       setHasMore(Boolean(data.has_more))
+      setSnapshot(data.snapshot)
+      setEvents(data.events || [])
+      setArchivedEvents(data.archived_events || [])
+    } catch (loadError) {
+      setError(loadError.message)
     } finally {
       setLoading(false)
     }
   }
 
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setError('')
+    setItems([])
+    setHasMore(false)
+    ;(async () => {
+      try {
+        const data = await apiFetch(buildMarketPath(0))
+        if (!alive) return
+        setItems(data.items || [])
+        setHasMore(Boolean(data.has_more))
+        setSnapshot(data.snapshot)
+        setEvents(data.events || [])
+        setArchivedEvents(data.archived_events || [])
+        setShowArchivedEvents(false)
+      } catch (loadError) {
+        if (alive) setError(loadError.message)
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [query, sortBy, movement])
+
+  const submitSearch = (event) => {
+    event.preventDefault()
+    setQuery(searchInput.trim())
+  }
+
   return (
     <div className="page">
       <section className="card page-head">
-        <h1>Статистика MOEX</h1>
+        <h1>MOEX</h1>
+        <p>Актуальный срез MOEX ISS: цена, изменение, оборот, сделки и рыночные события.</p>
       </section>
 
-      <div className="card" style={{ marginTop: '20px', overflowX: 'auto', padding: '0' }}>
-        {items.length ? (
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '800px' }}>
-            <thead>
-              <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
-                <th style={thStyle}>Дата</th>
-                <th style={thStyle}>ЦБ в листинге</th>
-                <th style={thStyle}>Общий объем, тыс. ₽</th>
-                <th style={thStyle}>Сделок</th>
-                <th style={thStyle}>Лидер торгов</th>
-                <th style={thStyle}>Объем лидера, тыс. ₽</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item, index) => (
-                <tr key={index} style={{ borderBottom: '1px solid #eee' }}>
-                  <td style={tdStyle}>{item.date}</td>
-                  <td style={tdStyle}>{item.sec_count}</td>
-                  <td style={tdStyle}>{item.total_value}</td>
-                  <td style={tdStyle}>{item.trades}</td>
-                  <td style={tdStyle}><strong>{item.top_ticker}</strong></td>
-                  <td style={tdStyle}>{item.top_value}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {snapshot ? (
+        <section className="card moex-snapshot">
+          <div className="section-head">
+            <div>
+              <h2>Рыночный снимок</h2>
+              <p className="muted">Последний доступный срез торговой сессии: {snapshot.trade_date || '—'} · обновлено {compactDate(snapshot.fetched_at)}</p>
+            </div>
+          </div>
+          <div className="moex-kpi-grid">
+            <div className="moex-kpi">
+              <span>Оборот, ₽</span>
+              <strong>{formatNumber(snapshot.total_value)}</strong>
+              <small>{snapshot.top_value_ticker || '—'} · {formatNumber(snapshot.top_value)}</small>
+            </div>
+            <div className="moex-kpi">
+              <span>Сделок</span>
+              <strong>{formatNumber(snapshot.total_trades)}</strong>
+              <small>{snapshot.most_traded_ticker || '—'} · {formatNumber(snapshot.most_traded_count)}</small>
+            </div>
+            <div className="moex-kpi">
+              <span>Лидер роста</span>
+              <strong>{snapshot.leader_gain_ticker || '—'} {formatPercent(snapshot.leader_gain_percent)}</strong>
+              <small>лучшее движение дня</small>
+            </div>
+            <div className="moex-kpi">
+              <span>Лидер снижения</span>
+              <strong>{snapshot.leader_drop_ticker || '—'} {formatPercent(snapshot.leader_drop_percent)}</strong>
+              <small>худшее движение дня</small>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      <section className="card moex-events">
+        <div className="section-head">
+          <div>
+            <h2>Рыночные события</h2>
+            <p className="muted">Критерии: оборот или число сделок в 3+ раза выше медианы за 30 торговых дней; либо цена изменилась на 3%+ за день.</p>
+          </div>
+        </div>
+        {events.length ? (
+          <div className="moex-event-list">
+            {events.map((event, idx) => (
+              <div key={idx} className="moex-event">
+                <div className="moex-event-head">
+                  <strong>{event.title}</strong>
+                </div>
+                {event.description ? <p>{event.description}</p> : null}
+                {event.related_tickers?.length ? <small>Тикеры: {event.related_tickers.join(', ')}</small> : null}
+              </div>
+            ))}
+          </div>
         ) : (
-          <div style={{ padding: '20px' }}>Данные не найдены в базе.</div>
+          <div className="empty-state">
+            <p className="muted">Сильных рыночных событий не найдено.</p>
+          </div>
         )}
-      </div>
+        {archivedEvents.length ? (
+          <div className="moex-archive-block">
+            <button className="button ghost" onClick={() => setShowArchivedEvents((value) => !value)}>
+              {showArchivedEvents ? 'Скрыть предыдущие дни' : 'Показать предыдущие 3 торговых дня'}
+            </button>
+            {showArchivedEvents ? (
+              <div className="moex-event-list moex-archive-list">
+                {archivedEvents.map((event, idx) => (
+                  <div key={`${event.event_date}-${idx}`} className="moex-event is-archived">
+                    <div className="moex-event-head">
+                      <strong>{event.title}</strong>
+                    </div>
+                    <small className="moex-event-date">{event.event_date || event.date || 'прошлая дата'}</small>
+                    {event.description ? <p>{event.description}</p> : null}
+                    {event.related_tickers?.length ? <small>Тикеры: {event.related_tickers.join(', ')}</small> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="card moex-table-card">
+        <div className="section-head">
+          <div>
+            <h2>Торги</h2>
+            <p className="muted">Поиск работает по тикеру и названию инструмента за последнюю доступную торговую дату.</p>
+          </div>
+        </div>
+        <form className="search-form moex-search-form" onSubmit={submitSearch}>
+          <input
+            className="search-input"
+            placeholder="Поиск по тикеру или названию. Нажмите Enter для запуска."
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+          />
+          <button className="button ghost" type="submit" disabled={loading}>
+            Найти
+          </button>
+        </form>
+        <div className="cards-toolbar moex-toolbar">
+          <CustomSelect
+            value={sortBy}
+            onChange={setSortBy}
+            options={[
+              { value: 'value_desc', label: 'По обороту' },
+              { value: 'trades_desc', label: 'По сделкам' },
+              { value: 'change_desc', label: 'Сильнее рост' },
+              { value: 'change_asc', label: 'Сильнее падение' },
+              { value: 'price_desc', label: 'По цене' },
+              { value: 'ticker_asc', label: 'По тикеру' }
+            ]}
+          />
+          <CustomSelect
+            value={movement}
+            onChange={setMovement}
+            options={[
+              { value: 'all', label: 'Все инструменты' },
+              { value: 'active', label: 'Только с торгами' },
+              { value: 'gainers', label: 'Только рост' },
+              { value: 'losers', label: 'Только падение' },
+              { value: 'strong', label: 'Движение 3%+' }
+            ]}
+          />
+        </div>
+        {error ? (
+          <div className="empty-state">
+            <p className="muted">{error}</p>
+          </div>
+        ) : null}
+          {items.length ? (
+            <div className="table-scroll">
+            <table className="market-table moex-table">
+              <thead>
+                <tr>
+                  <th>Тикер</th>
+                  <th>Название</th>
+                  <th>Цена</th>
+                  <th>Изм.</th>
+                  <th>Оборот, ₽</th>
+                  <th>Сделок</th>
+                  <th>Объём</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item, index) => (
+                  <tr key={`${item.secid}-${item.boardid}-${index}`}>
+                    <td><strong>{item.secid}</strong></td>
+                    <td>
+                      <div>{item.shortname || item.secname || '—'}</div>
+                      {item.secname && item.secname !== item.shortname ? <small className="muted">{item.secname}</small> : null}
+                    </td>
+                    <td>{formatNumber(item.last ?? item.marketprice, 2)}</td>
+                    <td className={Number(item.change_percent) >= 0 ? 'moex-positive' : 'moex-negative'}>
+                      {formatPercent(item.change_percent)}
+                    </td>
+                    <td>{formatNumber(item.value_rub)}</td>
+                    <td>{formatNumber(item.trades)}</td>
+                    <td>{formatNumber(item.volume)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+          ) : (
+            <div className="empty-state">
+              <p className="muted">{loading ? 'Пожалуйста подождите, данные загружаются.' : 'Данные не найдены в базе.'}</p>
+            </div>
+          )}
+      </section>
+
       {hasMore ? (
         <div className="load-more-row">
-          <button className="button ghost" onClick={loadMore} disabled={loading}>
+          <button className="button ghost" onClick={() => loadMarket(false)} disabled={loading}>
             {loading ? 'Загрузка...' : `Загрузить ещё ${PAGE_SIZE}`}
           </button>
         </div>
@@ -337,14 +562,31 @@ function Market({ market }) {
   );
 }
 
-// Стили для ячеек
-const thStyle = { padding: '15px', textAlign: 'left', color: '#666', fontSize: '0.9rem' };
-const tdStyle = { padding: '15px', fontSize: '0.95rem' };
+function formatNumber(value, decimals = 0) {
+  if (!value && value !== 0) return '—'
+  const num = typeof value === 'string' ? parseFloat(value) : value
+  if (Number.isNaN(num)) return '—'
+  return new Intl.NumberFormat('ru-RU', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  }).format(num)
+}
+
+function formatPercent(value) {
+  if (!value && value !== 0) return '—'
+  const num = typeof value === 'string' ? parseFloat(value) : value
+  if (Number.isNaN(num)) return '—'
+  return `${num > 0 ? '+' : ''}${formatNumber(num, 2)}%`
+}
+
 // Компонент для защиты путей
 function ProtectedRoute({ auth, children }) {
   if (!auth) {
     // Если не авторизован — редирект на логин (или на главную с алертом)
     return <Navigate to="/login" replace />;
+  }
+  if (!auth.user?.activated) {
+    return <Navigate to={`/activate?email=${encodeURIComponent(auth.user?.email || '')}`} replace />;
   }
   return children;
 }
@@ -429,13 +671,12 @@ export default function App() {
   const [overview, setOverview] = useState({})
   const [favorites, setFavorites] = useState([])
   const [notifications, setNotifications] = useState([])
+  const [unreadCount, setUnreadCount] = useState(0)
   const [settings, setSettings] = useState([])
   const [users, setUsers] = useState([])
-  const [promos, setPromos] = useState([])
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [messageClosing, setMessageClosing] = useState(false)
-  const [toast, setToast] = useState(null)
   const [updating, setUpdating] = useState(false)
 
   const persistAuth = (payload) => {
@@ -449,9 +690,9 @@ export default function App() {
     setAuth(null)
     setFavorites([])
     setNotifications([])
+    setUnreadCount(0)
     setSettings([])
     setUsers([])
-    setPromos([])
   }
 
   const refreshSignals = async () => {
@@ -483,18 +724,14 @@ export default function App() {
     setAuth(nextAuth)
     setFavorites(favs.items || [])
     setNotifications(notif.items || [])
+    setUnreadCount(notif.unread_count || 0)
     setSettings(prefs.items || [])
-    setToast((notif.items || [])[0] || null)
   }
 
   const refreshAdmin = async (token = auth?.token) => {
     if (!token) return
-    const [usersData, promosData] = await Promise.all([
-      apiFetch('/api/admin/users', {}, token),
-      apiFetch('/api/admin/promo-codes', {}, token),
-    ])
+    const usersData = await apiFetch('/api/admin/users', {}, token)
     setUsers(usersData.items || [])
-    setPromos(promosData.items || [])
   }
 
   const loadAll = async () => {
@@ -545,12 +782,6 @@ export default function App() {
       alive = false
     }
   }, [auth?.token])
-
-  useEffect(() => {
-    if (!toast && notifications.length) {
-      setToast(notifications[0])
-    }
-  }, [notifications, toast])
 
   const flash = (text) => {
     setMessageClosing(false)
@@ -612,6 +843,15 @@ export default function App() {
     await refreshSession(auth.token)
   }
 
+  const markNotificationRead = async (notificationId) => {
+    if (!auth?.token || !notificationId) return
+    await apiFetch(`/api/notifications/${notificationId}/read`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }, auth.token)
+    await refreshSession(auth.token)
+  }
+
   const rebuildNotifications = async () => {
     if (!auth?.token) return
     await apiFetch('/api/notifications/rebuild', {
@@ -639,9 +879,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      {toast ? <ToastBar item={toast} onClose={() => setToast(null)} /> : null}
-
-      <TopBar auth={auth} onLogout={logout} />
+      <TopBar auth={auth} onLogout={logout} unreadCount={unreadCount} />
 
       {message ? <div className={`top-message ${messageClosing ? 'closing' : ''}`}>{message}</div> : null}
 
@@ -653,17 +891,12 @@ export default function App() {
     <Route path="/digests" element={<DigestsPage />} />
     <Route path="/register" element={auth ? <Navigate to="/account" replace /> : <RegisterPage onAuth={persistAuth} />} />
     <Route path="/login" element={auth ? <Navigate to="/account" replace /> : <LoginPage onAuth={persistAuth} />} />
-    <Route path="/activate" element={auth ? <Navigate to="/account" replace /> : <ActivationPage onAuth={persistAuth} />} />
+    <Route path="/activate" element={<ActivationPage onAuth={persistAuth} auth={auth} />} />
 
     {/* Защищенные страницы (только для авторизованных) */}
     <Route path="/cards" element={
       <ProtectedRoute auth={auth}>
         <CardsPage signals={signalCardList} overview={overview} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} />
-      </ProtectedRoute>
-    } />
-    <Route path="/offtop-news" element={
-      <ProtectedRoute auth={auth}>
-        <OfftopNewsPage signals={signalCardList} favorites={favorites} auth={auth} onToggleFavorite={toggleFavorite} />
       </ProtectedRoute>
     } />
     <Route path="/signals/:id" element={
@@ -676,7 +909,7 @@ export default function App() {
     } />
     <Route path="/notifications" element={
       <ProtectedRoute auth={auth}>
-        <NotificationsPage auth={auth} overview={overview} notifications={notifications} settings={settings} onSaveSettings={saveNotificationSettings} onClear={clearNotifications} />
+        <NotificationsPage auth={auth} overview={overview} notifications={notifications} settings={settings} onSaveSettings={saveNotificationSettings} onClear={clearNotifications} onRead={markNotificationRead} />
       </ProtectedRoute>
     } />
     <Route path="/saved" element={
@@ -688,12 +921,11 @@ export default function App() {
       <ProtectedRoute auth={auth}><AccountPage auth={auth} onSaveProfile={saveProfile} /></ProtectedRoute>
     } />
 
-    {/* Админка (уже защищена RequireAdmin, который работает по тому же принципу) */}
     <Route path="/admin/users" element={
       <RequireAdmin auth={auth}><AdminUsersPage auth={auth} users={users} refreshAdmin={refreshAdmin} /></RequireAdmin>
     } />
-    <Route path="/admin/promos" element={
-      <RequireAdmin auth={auth}><AdminPromosPage auth={auth} promos={promos} refreshAdmin={refreshAdmin} /></RequireAdmin>
+    <Route path="/admin/subscriptions" element={
+      <Navigate to="/admin/users" replace />
     } />
 
     <Route path="*" element={<Navigate to="/" replace />} />
@@ -705,23 +937,34 @@ export default function App() {
   )
 }
 
-function TopBar({ auth, onLogout }) {
+function StarNavIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="nav-svg">
+      <path d="M12 3.4l2.6 5.26 5.8.84-4.2 4.1.99 5.78L12 16.65 6.81 19.38l.99-5.78-4.2-4.1 5.8-.84L12 3.4z" />
+    </svg>
+  )
+}
+
+function BellNavIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="nav-svg">
+      <path d="M12 22a2.6 2.6 0 0 0 2.5-1.9h-5A2.6 2.6 0 0 0 12 22zm7-5.2-1.7-1.7V10a5.3 5.3 0 0 0-4.1-5.2V3.7a1.2 1.2 0 0 0-2.4 0v1.1A5.3 5.3 0 0 0 6.7 10v5.1L5 16.8v1.1h14v-1.1z" />
+    </svg>
+  )
+}
+
+function TopBar({ auth, onLogout, unreadCount = 0 }) {
   const [open, setOpen] = useState(false)
 
   const links = [
     ['/', 'Главная'],
     ['/about', 'О проекте'],
+    ['/digests', 'Дайджесты'],
     ['/cards', 'FinTech News'],
-    ['/offtop-news', 'Offtop News'],
     ['/moex', 'MOEX'],
-    ['/notifications', 'Уведомления'],
   ]
 
   const isAdmin = auth?.user?.role === 'admin'
-
-  if (isAdmin) {
-    links.push(['/admin/users', 'Админ users'], ['/admin/promos', 'Админ promos'])
-  }
 
   return (
     <header className="topbar">
@@ -729,36 +972,61 @@ function TopBar({ auth, onLogout }) {
         <img src="/logoRedCat.png" alt="Red Cat" />
         <div>
           <div className="brand-title">Red Cat</div>
-          <div className="brand-subtitle">Trendwatcher</div>
+          <div className="brand-subtitle">TrendWatcher</div>
         </div>
       </Link>
 
       <nav className="nav">
-        {links.map(([to, label]) => (
+        {links.map(([rawTo, rawLabel]) => {
+          const to = rawTo
+          const label = rawLabel
+          return (
           <NavLink
             key={to}
             to={to}
             className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
           >
-            {label}
+            <span>{label}</span>
           </NavLink>
-        ))}
+          )
+        })}
 
         {auth ? (
+          <>
+          <NavLink
+            to="/saved"
+            title="Избранное"
+            aria-label="Избранное"
+            className={({ isActive }) => `nav-link nav-icon-link ${isActive ? 'active' : ''}`}
+          >
+            <StarNavIcon />
+          </NavLink>
+          <NavLink
+            to="/notifications"
+            title="Уведомления"
+            aria-label="Уведомления"
+            className={({ isActive }) => `nav-link nav-icon-link ${isActive ? 'active' : ''}`}
+          >
+            <BellNavIcon />
+            {unreadCount ? <span className="nav-unread-dot" /> : null}
+          </NavLink>
+          {isAdmin ? (
+            <NavLink to="/admin/users" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+              Пользователи
+            </NavLink>
+          ) : null}
           <div className="account-dropdown" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
             <NavLink to="/account" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-              {auth.user?.full_name || 'Профиль'}
+              {auth.user?.full_name || auth.user?.email || 'Профиль'}
             </NavLink>
             {open ? (
               <div className="dropdown-menu">
-                <NavLink to="/saved" className="dropdown-item">Сохранённые</NavLink>
-                {isAdmin ? (
-                  <NavLink to="/admin/users" className="dropdown-item">Админка</NavLink>
-                ) : null}
+                <NavLink to="/account" className="dropdown-item">Аккаунт</NavLink>
                 <button onClick={onLogout}>Выйти</button>
               </div>
             ) : null}
           </div>
+          </>
         ) : (
           <>
             <NavLink to="/login" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>Вход</NavLink>
@@ -858,21 +1126,22 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
           <p>Сервис мониторит финтех-новости, банковский рынок и регуляторные изменения, превращая поток публикаций в понятные аналитические карточки.</p>
           <div className="hero-actions">
             <Link to="/cards" className="button primary">Открыть FinTech News</Link>
-            <Link to="/offtop-news" className="button ghost">Offtop News</Link>
-            <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
-              {updating ? 'Запускаю...' : 'Обновить базу'}
-            </button>
+            {auth && auth.user?.role !== 'admin' && auth.user?.subscription_status === 'active' ? (
+              <button className="button ghost" onClick={onRunUpdate} disabled={updating}>
+                {updating ? 'Запускаю...' : 'Обновить базу'}
+              </button>
+            ) : null}
           </div>
         </div>
 
         <div className="hero-panel">
           <div className="kpi-grid">
-            <Kpi label="Наблюдений" value={counts.observations} />
-            <Kpi label="Источника" value={counts.sources} />
+            <Kpi label="Наблюдений за неделю" value={counts.observations} />
+            <Kpi label="Источников" value={counts.sources} />
             <Kpi label="Новостей за неделю" value={counts.processedLastWeek} />
             <Kpi label="Новостей за сутки" value={counts.processedLastDay} />
-            <Kpi label="Последний парсинг" value={counts.lastParsed} />
-            <Kpi label="Обновление базы" value={counts.lastUpdate} />
+            <Kpi label="Дата актуальности данных" value={counts.lastParsed} />
+            <Kpi label="Дата обновления базы" value={counts.lastUpdate} />
           </div>
         </div>
       </section>
@@ -1122,102 +1391,6 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
   )
 }
 
-function OfftopNewsPage({ signals, favorites = [], auth, onToggleFavorite }) {
-  const [searchInput, setSearchInput] = useState('')
-  const [query, setQuery] = useState('')
-  const [items, setItems] = useState([])
-  const [hasMore, setHasMore] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-
-  const loadOfftop = async (reset = false) => {
-    const offset = reset ? 0 : items.length
-    setLoading(true)
-    setError('')
-    if (reset) {
-      setItems([])
-      setHasMore(false)
-    }
-    try {
-      const params = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: String(offset),
-        hotness: '1',
-        sort: 'time_desc',
-      })
-      if (query.trim()) params.set('q', query.trim())
-      const data = await apiFetch(`/api/signals?${params.toString()}`)
-      const nextItems = data.items || []
-      setItems((prev) => reset ? nextItems : [...prev, ...nextItems])
-      setHasMore(Boolean(data.has_more))
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    loadOfftop(true)
-  }, [query])
-
-  const submitSearch = (event) => {
-    event.preventDefault()
-    setQuery(searchInput.trim())
-  }
-
-  return (
-    <div className="stack">
-      <section className="card page-head">
-        <h1>Offtop News</h1>
-        <p>Карточки, которые не попали в основную ленту, потому что не несут значительной ценности.</p>
-        <form className="search-form" onSubmit={submitSearch}>
-          <input
-            className="search-input"
-            placeholder="Поиск по всей базе offtop. Нажмите Enter для запуска."
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-          />
-          <button className="button ghost" type="submit" disabled={loading}>
-            Найти
-          </button>
-        </form>
-      </section>
-
-      {error ? (
-        <section className="card center-card">
-          <p className="muted">{error}</p>
-        </section>
-      ) : items.length ? (
-        <section className="cards-grid">
-          {items.map((item) => (
-            <SignalCard
-              key={item.id}
-              item={item}
-              auth={auth}
-              onToggleFavorite={onToggleFavorite}
-              favorite={favorites.some((fav) => fav.id === item.id)}
-              offtop
-            />
-          ))}
-        </section>
-      ) : (
-        <section className="card center-card">
-          <p className="muted">{loading ? 'Пожалуйста подождите, данные загружаются.' : 'По выбранным фильтрам ничего не найдено.'}</p>
-        </section>
-      )}
-
-      {hasMore ? (
-        <div className="load-more-row">
-          <button className="button ghost" onClick={() => loadOfftop(false)} disabled={loading}>
-            {loading ? 'Загрузка...' : `Загрузить ещё ${PAGE_SIZE}`}
-          </button>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
   const { id } = useParams();
   const cachedItem = signals.find((s) => String(s.id) === String(id));
@@ -1300,15 +1473,11 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
   )
 }
 
-function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 'default', offtop = false }) {
+function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 'default' }) {
   const published = item.published_at || item.created_at
   const navigate = useNavigate()
 
   const openCard = () => {
-    if (offtop && item.url) {
-      openExternalTab(item.url)
-      return
-    }
     navigate(`/signals/${item.id}`)
   }
 
@@ -1322,7 +1491,7 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
 
   return (
     <article
-      className={`signal-card variant-${variant} ${offtop ? 'is-offtop' : ''}`}
+      className={`signal-card variant-${variant}`}
       onClick={openCard}
       onKeyDown={openFromKeyboard}
       role="button"
@@ -1330,20 +1499,20 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
     >
       <div className="signal-top">
         <div className="signal-headline">
-          {!offtop ? <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span> : null}
+          <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span>
           <h3>{item.headline}</h3>
         </div>
-        {!offtop ? <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span> : null}
+        <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span>
       </div>
 
-      {!offtop ? <div className="signal-meta">
+      <div className="signal-meta">
         <span>{formatDate(published)}</span>
-      </div> : null}
+      </div>
 
-      {!offtop && item.summary ? <p>{item.summary}</p> : null}
-      {!offtop && variant !== 'small' && item.why_now ? <p><b>Актуальность:</b> {item.why_now}</p> : null}
+      {item.summary ? <p>{item.summary}</p> : null}
+      {variant !== 'small' && item.why_now ? <p><b>Актуальность:</b> {item.why_now}</p> : null}
 
-      {!offtop ? <SourceLinks item={item} compact /> : null}
+      <SourceLinks item={item} compact />
 
       <div className="signal-actions">
         <button className="button icon-button ghost" title="Скопировать ссылку" onClick={(event) => { event.stopPropagation(); copySignalLink(item.id) }}>
@@ -1391,11 +1560,12 @@ function SavedPage({ auth, favorites, onToggleFavorite }) {
   )
 }
 
-function NotificationsPage({ auth, overview = {}, notifications, settings, onSaveSettings, onClear }) {
+function NotificationsPage({ auth, overview = {}, notifications, settings, onSaveSettings, onClear, onRead }) {
   const [rules, setRules] = useState(settings.length ? settings : [{ theme: '', source_name: '', hotness_min: '' }])
   const [notice, setNotice] = useState('')
   const [saving, setSaving] = useState(false)
   const [clearing, setClearing] = useState(false)
+  const unreadTotal = notifications.filter((item) => !item.read).length
 
   useEffect(() => {
     setRules(settings.length ? settings : [{ theme: '', source_name: '', hotness_min: '' }])
@@ -1418,12 +1588,11 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
   }, [rules, overview.source_options])
 
   const hotnessOptions = [
-    { value: '', label: 'Любой hotness' },
-    { value: '5', label: 'Hotness от 5' },
-    { value: '4', label: 'Hotness от 4' },
-    { value: '3', label: 'Hotness от 3' },
-    { value: '2', label: 'Hotness от 2' },
-    { value: '1', label: 'Hotness от 1' }
+    { value: '', label: 'Любая важность' },
+    { value: '5', label: 'Только hotness 5' },
+    { value: '4', label: 'Hotness 4 и выше' },
+    { value: '3', label: 'Hotness 3 и выше' },
+    { value: '2', label: 'Hotness 2 и выше' }
   ];
 
   const addRule = () => {
@@ -1454,7 +1623,7 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
     setNotice('')
     try {
       await onSaveSettings(clean)
-      setNotice(clean.length ? 'Правила уведомлений сохранены.' : 'Правила очищены. Будут приходить все новые сигналы.')
+      setNotice(clean.length ? 'Правила сохранены. Новые уведомления будут приходить по ним.' : 'Правила очищены. Новые сигналы будут приходить без фильтров.')
     } catch (error) {
       setNotice(error.message)
     } finally {
@@ -1479,6 +1648,9 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
     if (item.signal_id) {
       openExternalTab(routeUrl(`/signals/${item.signal_id}`))
     }
+    if (!item.read) {
+      onRead?.(item.id).catch(() => {})
+    }
   }
 
   if (!auth) {
@@ -1494,18 +1666,19 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
     <div className="stack">
       <section className="card page-head">
         <h1>Уведомления</h1>
-        <p>Настройте, какие новости попадут в вашу ленту. Условия внутри одного правила работают вместе.</p>
+        <p>Настройте правила для новых сигналов. Каждое правило работает отдельно: если новость подходит хотя бы под одно, она попадёт в ленту.</p>
         <div className="notification-stats">
           <div className="mini-stat">Правил: {settings.length}</div>
-          <div className="mini-stat">Уведомлений: {notifications.length}</div>
+          <div className="mini-stat">Новых: {unreadTotal}</div>
+          <div className="mini-stat">Всего: {notifications.length}</div>
         </div>
       </section>
 
       <section className="card notification-settings-card">
         <div className="section-head">
           <div>
-            <h2>Правила отбора</h2>
-            <p className="muted">Оставьте поле пустым, если по нему не нужно ограничение.</p>
+            <h2>Правила уведомлений</h2>
+            <p className="muted">Категории и источники подтягиваются из текущей базы. Пустое поле означает, что ограничение не применяется.</p>
           </div>
           <button className="button ghost" onClick={addRule}>Добавить правило</button>
         </div>
@@ -1537,7 +1710,7 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
               </label>
 
               <label className="field">
-                <span>Минимальная важность</span>
+                <span>Важность</span>
                 <CustomSelect
                   value={rule.hotness_min}
                   options={hotnessOptions}
@@ -1559,8 +1732,8 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
       <section className="card notification-feed-card">
         <div className="section-head">
           <div>
-            <h2>Лента уведомлений</h2>
-            <p className="muted">Новые совпадения по вашим правилам.</p>
+            <h2>Лента</h2>
+            <p className="muted">Здесь появляются только новые карточки после обновления базы.</p>
           </div>
           <button className="button ghost" onClick={clearAllNotifications} disabled={clearing || !notifications.length}>
             {clearing ? 'Очищаю...' : 'Очистить'}
@@ -1570,8 +1743,12 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
         {notifications.length ? (
           <div className="notification-list">
             {notifications.map((item) => (
-              <button key={item.id} className="notification-card" onClick={() => openNotification(item)}>
-                <div className="notification-title">{item.title}</div>
+              <button key={item.id} className={`notification-card ${item.read ? '' : 'unread'}`} onClick={() => openNotification(item)}>
+                <div className="notification-title-row">
+                  <span className="notification-title">{item.title}</span>
+                  {!item.read ? <span className="mini-pill notification-new">Новое</span> : null}
+                </div>
+                {item.message ? <div className="notification-message">{item.message}</div> : null}
                 <div className="notification-subtitle">{formatDate(item.created_at)}</div>
               </button>
             ))}
@@ -1593,6 +1770,8 @@ function AccountPage({ auth, onSaveProfile }) {
   const [avatarUrl, setAvatarUrl] = useState(auth?.user?.avatar_url || '')
   const [notice, setNotice] = useState('')
   const [saving, setSaving] = useState(false)
+  const [showRenewPlans, setShowRenewPlans] = useState(false)
+  const [renewPlan, setRenewPlan] = useState('basic')
 
   useEffect(() => {
     setFullName(auth?.user?.full_name || '')
@@ -1606,6 +1785,11 @@ function AccountPage({ auth, onSaveProfile }) {
     const reader = new FileReader()
     reader.onload = () => setAvatarUrl(String(reader.result || ''))
     reader.readAsDataURL(file)
+  }
+
+  const submitRenewal = (event) => {
+    event.preventDefault()
+    setNotice('На данный момент не доступна')
   }
 
   const save = async (e) => {
@@ -1653,11 +1837,45 @@ function AccountPage({ auth, onSaveProfile }) {
         </div>
       </section>
 
+      <section className="card subscription-card">
+        <div>
+          <span className="eyebrow">Подписка</span>
+          <h2>{planLabel(auth.user.subscription_plan)}</h2>
+          <p>{subscriptionStatusLabel(auth.user.subscription_status)}</p>
+          <p className="muted">
+            {auth.user.subscription_expires_at ? `Действует до ${compactDate(auth.user.subscription_expires_at)}` : 'Без ограничения срока'}
+          </p>
+        </div>
+        {auth.user.role !== 'admin' ? (
+          <button
+            className="button ghost"
+            onClick={() => {
+              setShowRenewPlans((value) => !value)
+              setNotice('')
+            }}
+          >
+            Продлить
+          </button>
+        ) : null}
+      </section>
+
+      {showRenewPlans ? (
+        <section className="card form-card">
+          <h2>Продление подписки</h2>
+          <form className="form-grid" onSubmit={submitRenewal}>
+            <PlanSelector selectedPlan={renewPlan} onSelect={setRenewPlan} includeDemo={false} />
+            <button className="button primary full" type="submit">
+              Подключить тариф
+            </button>
+          </form>
+        </section>
+      ) : null}
+
       <section className="card form-card">
         <h2>Редактирование профиля</h2>
         <form className="form-grid" onSubmit={save}>
           <label className="field">
-            <span>ФИО</span>
+            <span>Логин</span>
             <input value={fullName} onChange={(e) => setFullName(e.target.value)} />
           </label>
           <label className="field">
@@ -1682,12 +1900,62 @@ function AccountPage({ auth, onSaveProfile }) {
   )
 }
 
+function PlanSelector({ selectedPlan, onSelect, includeDemo = true }) {
+  const plans = [
+    {
+      id: 'demo',
+      title: 'Демо-доступ',
+      price: '0 ₽',
+      term: '7 дней',
+      description: 'Демо-доступ ко всем возможностям Red Cat TrendWatcher',
+    },
+    {
+      id: 'basic',
+      title: 'Basic',
+      price: 'Скоро',
+      term: '31 день',
+      description: 'Базовый мониторинг трендов, избранное и уведомления.',
+      unavailable: true,
+    },
+    {
+      id: 'plus',
+      title: 'Plus',
+      price: 'Скоро',
+      term: '31 день',
+      description: 'Расширенная витрина, персональные правила и приоритетные сценарии.',
+      unavailable: true,
+    },
+  ].filter((plan) => includeDemo || plan.id !== 'demo')
+
+  return (
+    <div className="plan-options" role="radiogroup" aria-label="Тарифный план">
+      {plans.map((plan) => (
+        <button
+          key={plan.id}
+          type="button"
+          className={`plan-card plan-card-button ${selectedPlan === plan.id ? 'selected' : ''}`}
+          onClick={() => onSelect(plan.id)}
+          role="radio"
+          aria-checked={selectedPlan === plan.id}
+        >
+          <div>
+            <h3>{plan.title}</h3>
+            <p>{plan.description}</p>
+            <span className="plan-term">{plan.term}</span>
+          </div>
+          <strong className={plan.unavailable ? 'muted-price' : ''}>{plan.price}</strong>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function RegisterPage({ onAuth }) {
   const [step, setStep] = useState(1)
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [promoCode, setPromoCode] = useState('')
+  const [selectedPlan, setSelectedPlan] = useState('demo')
   const [notice, setNotice] = useState('')
   const navigate = useNavigate()
 
@@ -1704,7 +1972,7 @@ function RegisterPage({ onAuth }) {
       })
       setEmail(data.user.email)
       setStep(2)
-      setNotice('Аккаунт создан. Введите код активации.')
+      setNotice('')
     } catch (error) {
       if (error.data?.requires_activation) {
         const activationEmail = encodeURIComponent(error.data.email || email)
@@ -1717,18 +1985,22 @@ function RegisterPage({ onAuth }) {
 
   const activate = async (e) => {
     e.preventDefault()
+    if (selectedPlan !== 'demo') {
+      setNotice('На данный момент не доступна')
+      return
+    }
     try {
       const data = await apiFetch('/api/activate', {
         method: 'POST',
         body: JSON.stringify({
           email,
-          promo_code: promoCode,
+          plan: selectedPlan,
         }),
       })
       onAuth(data)
       navigate('/account')
     } catch (error) {
-      setNotice(error.data?.requires_activation ? 'Аккаунт нужно активировать. Перейдите в регистрацию и введите код активации.' : error.message)
+      setNotice(error.data?.requires_activation ? 'Аккаунт нужно активировать. Выберите тарифный план.' : error.message)
     }
   }
 
@@ -1736,14 +2008,14 @@ function RegisterPage({ onAuth }) {
     <div className="stack">
       <section className="card page-head">
         <h1>Регистрация аккаунта</h1>
-        <p>После регистрации нужно активировать аккаунт кодом доступа.</p>
+        <p>После регистрации выберите тарифный план для доступа к сервису.</p>
       </section>
 
       <section className="card form-card">
         {step === 1 ? (
           <form className="form-grid" onSubmit={register}>
             <label className="field">
-              <span>ФИО</span>
+              <span>Логин</span>
               <input value={fullName} onChange={(e) => setFullName(e.target.value)} />
             </label>
             <label className="field">
@@ -1758,13 +2030,9 @@ function RegisterPage({ onAuth }) {
           </form>
         ) : (
           <form className="form-grid" onSubmit={activate}>
-            <div className="flash">Почта для активации: {email}</div>
-            <label className="field">
-              <span>Введите код активации</span>
-              <input value={promoCode} onChange={(e) => setPromoCode(e.target.value)} />
-            </label>
+            <PlanSelector selectedPlan={selectedPlan} onSelect={setSelectedPlan} />
             <button className="button primary full" type="submit">
-              Активировать
+              Подключить тариф
             </button>
           </form>
         )}
@@ -1780,17 +2048,21 @@ function ActivationPage({ onAuth }) {
   const navigate = useNavigate()
   const params = new URLSearchParams(location.search)
   const [email, setEmail] = useState(params.get('email') || '')
-  const [promoCode, setPromoCode] = useState('')
+  const [selectedPlan, setSelectedPlan] = useState('demo')
   const [notice, setNotice] = useState('Аккаунт нужно активировать.')
 
   const activate = async (event) => {
     event.preventDefault()
+    if (selectedPlan !== 'demo') {
+      setNotice('На данный момент не доступна')
+      return
+    }
     try {
       const data = await apiFetch('/api/activate', {
         method: 'POST',
         body: JSON.stringify({
           email,
-          promo_code: promoCode,
+          plan: selectedPlan,
         }),
       })
       onAuth(data)
@@ -1804,7 +2076,7 @@ function ActivationPage({ onAuth }) {
     <div className="stack">
       <section className="card page-head">
         <h1>Активация аккаунта</h1>
-        <p>Введите код активации, чтобы открыть доступ к сервису.</p>
+        <p>Выберите тарифный план для доступа к сервису.</p>
       </section>
 
       <section className="card form-card">
@@ -1813,12 +2085,9 @@ function ActivationPage({ onAuth }) {
             <span>Почта</span>
             <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
           </label>
-          <label className="field">
-            <span>Введите код активации</span>
-            <input value={promoCode} onChange={(event) => setPromoCode(event.target.value)} />
-          </label>
+          <PlanSelector selectedPlan={selectedPlan} onSelect={setSelectedPlan} />
           <button className="button primary full" type="submit">
-            Активировать
+            Подключить тариф
           </button>
         </form>
         {notice ? <div className="flash">{notice}</div> : null}
@@ -1879,28 +2148,35 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
   const [current, setCurrent] = useState(null)
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
-  const [role, setRole] = useState('user')
   const [activated, setActivated] = useState(false)
   const [notice, setNotice] = useState('')
 
-  const handleForceUpdate = async () => {
-    if (!window.confirm("Запустить принудительное обновление базы?")) return;
+  const updateSubscription = async (user, patch) => {
     try {
-      const data = await apiFetch('/api/admin/update', {
-        method: 'POST',
-        body: JSON.stringify({}),
+      await apiFetch(`/api/admin/subscriptions/${user.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          subscription_plan: user.subscription_plan || '',
+          subscription_status: user.subscription_status || 'inactive',
+          ...patch,
+        }),
       }, auth.token)
-      setNotice(updateMessage(data))
-    } catch (err) {
-      setNotice(updateErrorMessage(err))
+      await refreshAdmin(auth.token)
+      setNotice('Подписка обновлена')
+    } catch (error) {
+      setNotice(error.message)
     }
-  };
+  }
+
+  const submitRenewal = (event) => {
+    event.preventDefault()
+    setNotice('На данный момент не доступна')
+  }
 
   const openEdit = (user) => {
     setCurrent(user)
     setFullName(user.full_name)
     setEmail(user.email)
-    setRole(user.role)
     setActivated(user.activated)
   }
 
@@ -1910,7 +2186,7 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
     try {
       await apiFetch(`/api/admin/users/${current.id}`, {
         method: 'PUT',
-        body: JSON.stringify({ full_name: fullName, email, role, activated }),
+        body: JSON.stringify({ full_name: fullName, email, activated }),
       }, auth.token)
 
       await refreshAdmin(auth.token)
@@ -1923,16 +2199,8 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
   return (
     <div className="stack">
       <section className="card page-head">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h1>Пользователи</h1>
-            <p>Здесь можно редактировать роли и доступ.</p>
-          </div>
-          {/* ДОБАВЛЕННАЯ КНОПКА */}
-          <button className="button primary" onClick={handleForceUpdate}>
-            Обновить базу
-          </button>
-        </div>
+        <h1>Пользователи</h1>
+        <p>Таблица аккаунтов, подписок и срока доступа.</p>
       </section>
 
       <section className="grid-2">
@@ -1941,9 +2209,12 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
             <thead>
               <tr>
                 <th>ID</th>
-                <th>Имя</th>
+                <th>Логин</th>
                 <th>Почта</th>
                 <th>Роль</th>
+                <th>Подписка</th>
+                <th>Статус</th>
+                <th>До</th>
                 <th />
               </tr>
             </thead>
@@ -1954,6 +2225,34 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
                   <td>{user.full_name}</td>
                   <td>{user.email}</td>
                   <td>{user.role}</td>
+                  <td>
+                    {user.email === 'manager@redcat.tu' ? planLabel(user.subscription_plan) : (
+                      <CustomSelect
+                        value={user.subscription_plan || ''}
+                        options={[
+                          { value: '', label: 'Без подписки' },
+                          { value: 'demo', label: 'Демо · 7 дней' },
+                          { value: 'basic', label: 'Basic · 31 день' },
+                          { value: 'plus', label: 'Plus · 31 день' },
+                        ]}
+                        onChange={(value) => updateSubscription(user, { subscription_plan: value })}
+                      />
+                    )}
+                  </td>
+                  <td>
+                    {user.email === 'manager@redcat.tu' ? subscriptionStatusLabel(user.subscription_status) : (
+                      <CustomSelect
+                        value={user.subscription_status || 'inactive'}
+                        options={[
+                          { value: 'active', label: 'Активна' },
+                          { value: 'inactive', label: 'Отключена' },
+                          { value: 'expired', label: 'Истекла' },
+                        ]}
+                        onChange={(value) => updateSubscription(user, { subscription_status: value })}
+                      />
+                    )}
+                  </td>
+                  <td>{user.subscription_expires_at ? compactDate(user.subscription_expires_at) : '—'}</td>
                   <td>
                     <button className="button ghost" onClick={() => openEdit(user)}>Редактировать</button>
                   </td>
@@ -1968,19 +2267,12 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
           {current ? (
             <form className="form-grid" onSubmit={save}>
               <label className="field">
-                <span>ФИО</span>
+                <span>Логин</span>
                 <input value={fullName} onChange={(e) => setFullName(e.target.value)} />
               </label>
               <label className="field">
                 <span>Почта</span>
                 <input value={email} onChange={(e) => setEmail(e.target.value)} />
-              </label>
-              <label className="field">
-                <span>Роль</span>
-                <select value={role} onChange={(e) => setRole(e.target.value)}>
-                  <option value="user">user</option>
-                  <option value="admin">admin</option>
-                </select>
               </label>
               <label className="promo-switch">
                 <input type="checkbox" checked={activated} onChange={(e) => setActivated(e.target.checked)} />
@@ -1998,34 +2290,21 @@ function AdminUsersPage({ auth, users, refreshAdmin }) {
   )
 }
 
-function AdminPromosPage({ auth, promos, refreshAdmin }) {
-  const [code, setCode] = useState('')
-  const [description, setDescription] = useState('')
+function AdminSubscriptionsPage({ auth, users, refreshAdmin }) {
   const [notice, setNotice] = useState('')
 
-  const addPromo = async (e) => {
-    e.preventDefault()
+  const updateSubscription = async (user, patch) => {
     try {
-      await apiFetch('/api/admin/promo-codes', {
-        method: 'POST',
-        body: JSON.stringify({ code, description }),
-      }, auth.token)
-      setCode('')
-      setDescription('')
-      setNotice('Промокод добавлен')
-      await refreshAdmin(auth.token)
-    } catch (error) {
-      setNotice(error.message)
-    }
-  }
-
-  const updatePromo = async (promo, patch) => {
-    try {
-      await apiFetch(`/api/admin/promo-codes/${promo.id}`, {
+      await apiFetch(`/api/admin/subscriptions/${user.id}`, {
         method: 'PUT',
-        body: JSON.stringify(patch),
+        body: JSON.stringify({
+          subscription_plan: user.subscription_plan || '',
+          subscription_status: user.subscription_status || 'inactive',
+          ...patch,
+        }),
       }, auth.token)
       await refreshAdmin(auth.token)
+      setNotice('Подписка обновлена')
     } catch (error) {
       setNotice(error.message)
     }
@@ -2034,29 +2313,51 @@ function AdminPromosPage({ auth, promos, refreshAdmin }) {
   return (
     <div className="stack">
       <section className="card page-head">
-        <h1>Промокоды</h1>
+        <h1>Подписки</h1>
+        <p>Управление демо-доступом пользователей.</p>
       </section>
 
-      <section className="card form-card">
-        <form className="promo-form" onSubmit={addPromo}>
-          <input placeholder="Код" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} />
-          <input placeholder="Описание" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <button className="button primary" type="submit">Добавить</button>
-        </form>
-
-        <div className="promo-list">
-          {promos.map((promo) => (
-            <div key={promo.id} className="promo-row">
-              <input value={promo.code} onChange={(e) => updatePromo(promo, { code: e.target.value })} />
-              <input value={promo.description || ''} onChange={(e) => updatePromo(promo, { description: e.target.value })} />
-              <label className="promo-switch">
-                <input type="checkbox" checked={promo.active} onChange={(e) => updatePromo(promo, { active: e.target.checked })} />
-                active
-              </label>
-            </div>
-          ))}
-        </div>
-
+      <section className="card table-wrap">
+        <table className="market-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Логин</th>
+              <th>Почта</th>
+              <th>Тариф</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((user) => (
+              <tr key={user.id}>
+                <td>{user.id}</td>
+                <td>{user.full_name}</td>
+                <td>{user.email}</td>
+                <td>
+                  <CustomSelect
+                    value={user.subscription_plan || ''}
+                    options={[
+                      { value: '', label: 'Без тарифа' },
+                      { value: 'demo', label: 'Демо-доступ · 0 ₽' },
+                    ]}
+                    onChange={(value) => updateSubscription(user, { subscription_plan: value })}
+                  />
+                </td>
+                <td>
+                  <CustomSelect
+                    value={user.subscription_status || 'inactive'}
+                    options={[
+                      { value: 'active', label: 'Активна' },
+                      { value: 'inactive', label: 'Отключена' },
+                    ]}
+                    onChange={(value) => updateSubscription(user, { subscription_status: value })}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
         {notice ? <div className="flash">{notice}</div> : null}
       </section>
     </div>
