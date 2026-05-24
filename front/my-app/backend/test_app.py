@@ -79,9 +79,9 @@ def client(app):
 @pytest.fixture
 def auth_headers(client):
     """Фикстура для получения токена обычного пользователя."""
-    # Используем данные из SAMPLE_USERS в app.py
-    login_data = {"email": "user@redcat.local", "password": "User12345!"}
-    res = client.post('/api/login', json=login_data)
+    register_data = {"full_name": "Test User", "email": "user@redcat.local", "password": "User12345!"}
+    client.post('/api/register', json=register_data)
+    res = client.post('/api/activate', json={"email": register_data["email"], "plan": "demo"})
     token = res.json['token']
     return {"Authorization": f"Bearer {token}"}
 
@@ -157,21 +157,21 @@ def test_notification_settings_persistence(client, auth_headers):
 
 # --- ТЕСТЫ АДМИН-ПАНЕЛИ ---
 
-def test_admin_promo_management(client, admin_headers):
-    """Проверка создания и изменения промокода админом."""
-    # Создание
-    new_promo = {"code": "NEW2026", "description": "Test promo"}
-    res = client.post('/api/admin/promo-codes', json=new_promo, headers=admin_headers)
+def test_admin_subscription_management(client, admin_headers):
+    """Проверка изменения подписки админом."""
+    register_data = {"full_name": "Sub User", "email": "sub@redcat.local", "password": "User12345!"}
+    client.post('/api/register', json=register_data)
+    users_res = client.get('/api/admin/users', headers=admin_headers)
+    target_user = next(user for user in users_res.json['items'] if user['email'] == register_data['email'])
+
+    res = client.put(
+        f"/api/admin/subscriptions/{target_user['id']}",
+        json={"subscription_plan": "basic", "subscription_status": "active"},
+        headers=admin_headers,
+    )
     assert res.status_code == 200
-    promo_id = res.json['item']['id']
-
-    # Деактивация
-    client.put(f'/api/admin/promo-codes/{promo_id}', json={"active": False}, headers=admin_headers)
-
-    # Проверка статуса
-    get_res = client.get('/api/admin/promo-codes', headers=admin_headers)
-    target = next(p for p in get_res.json['items'] if p['id'] == promo_id)
-    assert target['active'] is False
+    assert res.json['user']['subscription_plan'] == 'basic'
+    assert res.json['user']['subscription_status'] == 'active'
 
 
 def test_unauthorized_admin_access(client, auth_headers):

@@ -12,26 +12,66 @@ try:
 except ModuleNotFoundError:
     from init_db import DB_PATH, connect_db
 
-
-OPENROUTER_EMBEDDINGS_ENDPOINT = "https://openrouter.ai/api/v1/embeddings"
-OPENROUTER_EMBEDDING_MODEL = "openai/text-embedding-3-large"
-OPENROUTER_TIMEOUT_SECONDS = 60
-OPENROUTER_MAX_RETRIES = 3
-OPENROUTER_RETRY_SECONDS = 20
-OPENROUTER_EMBEDDING_REQUEST_DELAY_SECONDS = 0
-DEFAULT_SIMILARITY_THRESHOLD = 0.62
-DUPLICATE_LOOKBACK_DAYS = 3
-DEFAULT_BATCH_SIZE = 100
-DEFAULT_PCA_ENABLED = True
-DEFAULT_PCA_REMOVE_COMPONENTS = 1
-DEFAULT_PCA_WHITEN = False
-DEFAULT_PCA_MIN_SIGNALS = 20
-DEFAULT_PCA_EPSILON = 1e-6
-DEFAULT_PCA_MAX_FIT_SIGNALS = None
-DEFAULT_PCA_RANDOM_SEED = 42
-PCA_PROJECTION_BLOCK_SIZE = 256
-SIMILARITY_SEARCH_MODE = "streaming_row_dot"
-DUPLICATE_PREFIX = "DUBLICATE OF "
+try:
+    from model.pipeline_config import (
+        DEFAULT_EMBEDDING_BATCH_SIZE,
+        DEFAULT_PCA_ENABLED,
+        DEFAULT_PCA_EPSILON,
+        DEFAULT_PCA_MAX_FIT_SIGNALS,
+        DEFAULT_PCA_MIN_SIGNALS,
+        DEFAULT_PCA_RANDOM_SEED,
+        DEFAULT_PCA_REMOVE_COMPONENTS,
+        DEFAULT_PCA_WHITEN,
+        DEFAULT_SIMILARITY_THRESHOLD,
+        DUPLICATE_LOOKBACK_DAYS,
+        FINTECH_KEYWORDS,
+        OPENROUTER_EMBEDDING_MODEL,
+        OPENROUTER_EMBEDDING_REQUEST_DELAY_SECONDS,
+        OPENROUTER_EMBEDDINGS_ENDPOINT,
+        OPENROUTER_MAX_RETRIES,
+        OPENROUTER_RETRY_SECONDS,
+        OPENROUTER_TIMEOUT_SECONDS,
+        PCA_PROJECTION_BLOCK_SIZE,
+        RIGIDITY_KEYWORDS,
+        SCALE_KEYWORDS,
+        SIMILARITY_SEARCH_MODE,
+        STATUS_DEDUP_DONE,
+        STATUS_DUPLICATE,
+        STATUS_EMBEDDING_DONE,
+        STATUS_LLM_DONE,
+        STATUS_MODELS_DONE,
+    )
+    from model.hotness_inference import get_hotness_model_status, predict_hotness_score, predict_signal_models
+except ModuleNotFoundError:
+    from pipeline_config import (
+        DEFAULT_EMBEDDING_BATCH_SIZE,
+        DEFAULT_PCA_ENABLED,
+        DEFAULT_PCA_EPSILON,
+        DEFAULT_PCA_MAX_FIT_SIGNALS,
+        DEFAULT_PCA_MIN_SIGNALS,
+        DEFAULT_PCA_RANDOM_SEED,
+        DEFAULT_PCA_REMOVE_COMPONENTS,
+        DEFAULT_PCA_WHITEN,
+        DEFAULT_SIMILARITY_THRESHOLD,
+        DUPLICATE_LOOKBACK_DAYS,
+        FINTECH_KEYWORDS,
+        OPENROUTER_EMBEDDING_MODEL,
+        OPENROUTER_EMBEDDING_REQUEST_DELAY_SECONDS,
+        OPENROUTER_EMBEDDINGS_ENDPOINT,
+        OPENROUTER_MAX_RETRIES,
+        OPENROUTER_RETRY_SECONDS,
+        OPENROUTER_TIMEOUT_SECONDS,
+        PCA_PROJECTION_BLOCK_SIZE,
+        RIGIDITY_KEYWORDS,
+        SCALE_KEYWORDS,
+        SIMILARITY_SEARCH_MODE,
+        STATUS_DEDUP_DONE,
+        STATUS_DUPLICATE,
+        STATUS_EMBEDDING_DONE,
+        STATUS_LLM_DONE,
+        STATUS_MODELS_DONE,
+    )
+    from hotness_inference import get_hotness_model_status, predict_hotness_score, predict_signal_models
 CURRENCY_RATES_PHRASE = "курсы валют"
 SPECIAL_SUMMARIES = {
     "Вышла таблица.",
@@ -43,9 +83,8 @@ SPECIAL_SUMMARIES = {
 def process_signal_duplicates(
     db_path=DB_PATH,
     similarity_threshold=DEFAULT_SIMILARITY_THRESHOLD,
-    batch_size=DEFAULT_BATCH_SIZE,
+    batch_size=DEFAULT_EMBEDDING_BATCH_SIZE,
 ):
-    ensure_duplicates_configured()
     started_at = datetime.now()
 
     with connect_db(db_path) as db:
@@ -61,20 +100,24 @@ def process_signal_duplicates(
             for signal in signals
             if not signal.get("is_duplicate")
         ]
+        hydrate_signal_embeddings(candidate_signals)
+        candidates_to_embed = [
+            signal
+            for signal in candidate_signals
+            if should_embed_signal(signal)
+        ]
+
+        if candidates_to_embed:
+            ensure_duplicates_configured()
+        embeddings_created, embedding_usage = embed_and_store_signals(db, candidates_to_embed, batch_size)
+        models_result = apply_signal_models(db, candidate_signals)
+
         eligible_signals = [
             signal
             for signal in candidate_signals
             if is_dedup_eligible(signal)
         ]
-        hydrate_signal_embeddings(eligible_signals)
         excluded_signals = len(candidate_signals) - len(eligible_signals)
-        candidates_to_embed = [
-            signal
-            for signal in eligible_signals
-            if not signal.get("embedding")
-        ]
-
-        embeddings_created, embedding_usage = embed_and_store_signals(db, candidates_to_embed, batch_size)
 
         all_candidates = [
             signal
@@ -106,10 +149,13 @@ def process_signal_duplicates(
 
             for duplicate_signal in duplicate_signals:
                 duplicate_signal["is_duplicate"] = True
-                duplicate_signal["draft"] = f"{DUPLICATE_PREFIX}{base_signal['base_raw_news_id']}"
+                duplicate_signal["duplicate_of"] = base_signal["id"]
+                duplicate_signal["duplicate_group_id"] = make_duplicate_group_id(base_signal)
+                duplicate_signal["processing_status"] = STATUS_DUPLICATE
 
         checked_signals = [signal for signal in eligible_signals if not signal.get("is_duplicate")]
-        mark_signals_dedup_checked(db, checked_signals)
+        mark_signals_dedup_done(db, checked_signals)
+        hotness_result = update_final_hotness_scores(db, candidate_signals)
 
     finished_at = datetime.now()
     return {
@@ -118,6 +164,9 @@ def process_signal_duplicates(
         "excluded_signals": excluded_signals,
         "compared_signals": len(all_candidates),
         "embedded_signals": embeddings_created,
+        "models": models_result,
+        "models_processed": models_result.get("processed", 0),
+        "hotness": hotness_result,
         "duplicates_marked": duplicates_marked,
         "merged_sources": merged_sources,
         "similarity_threshold": similarity_threshold,
@@ -131,48 +180,139 @@ def process_signal_duplicates(
 
 def load_dedup_signals(db):
     rows = db.execute("""
-        SELECT id, headline, hotness, why_now, summary, sources, draft
+        SELECT
+            id,
+            headline,
+            hotness,
+            why_now,
+            category,
+            summary,
+            sources,
+            draft,
+            embedding_json,
+            processing_status,
+            is_fintech,
+            is_duplicate,
+            duplicate_of,
+            duplicate_group_id,
+            scale_score,
+            urgency_score,
+            rigidity_score
         FROM signals
         WHERE summary IS NOT NULL
           AND TRIM(summary) != ''
-          AND (draft IS NULL OR draft NOT LIKE ?)
         ORDER BY id ASC
-    """, (f"{DUPLICATE_PREFIX}%",)).fetchall()
+    """).fetchall()
 
     signals = []
     for row in rows:
         signal = dict(row)
-        draft = signal.get("draft") or ""
         signal["source_ids"] = parse_source_ids(signal.get("sources"))
         signal["embedding"] = None
-        signal["dedup_checked"] = '"dedup_checked_at"' in draft
-        signal["is_duplicate"] = is_duplicate_draft(signal.get("draft"))
+        signal["is_duplicate"] = bool(signal.get("is_duplicate"))
         signals.append(signal)
     return signals
 
 
 def hydrate_signal_embeddings(signals):
     for signal in signals:
-        draft_data = parse_draft_json(signal.get("draft"))
-        if not draft_data:
+        embedding_data = parse_embedding_json(signal.get("embedding_json"))
+        if not embedding_data:
             continue
 
-        embedding = draft_data.get("embedding")
+        embedding = embedding_data.get("embedding")
         if is_valid_embedding(embedding):
             signal["embedding"] = embedding
-        signal["dedup_checked"] = bool(draft_data.get("dedup_checked_at"))
 
 
 def is_valid_embedding(value):
     return isinstance(value, list) and bool(value)
 
 
+def should_embed_signal(signal):
+    if signal.get("embedding"):
+        return False
+    if signal.get("is_duplicate"):
+        return False
+    if not clean_text(signal.get("summary")):
+        return False
+    return signal.get("processing_status") in {
+        STATUS_LLM_DONE,
+        None,
+        "",
+    }
+
+
 def is_dedup_eligible(signal):
-    if normalize_hotness(signal.get("hotness")) <= 1:
+    if signal.get("is_duplicate"):
+        return False
+    if not bool(signal.get("is_fintech")):
         return False
     if is_report_signal(signal):
         return False
     return bool(clean_text(signal.get("summary")))
+
+
+def apply_signal_models(db, signals):
+    updated_count = 0
+    fintech_count = 0
+    non_fintech_count = 0
+    for signal in signals:
+        if signal.get("is_duplicate"):
+            continue
+        if not signal.get("embedding"):
+            continue
+        if signal.get("processing_status") != STATUS_EMBEDDING_DONE:
+            continue
+
+        model_result = predict_signal_models(signal.get("embedding"))
+        signal.update(model_result)
+        if model_result["is_fintech"]:
+            fintech_count += 1
+        else:
+            non_fintech_count += 1
+        db.execute(
+            """
+            UPDATE signals
+            SET is_fintech = ?,
+                scale_score = ?,
+                urgency_score = ?,
+                rigidity_score = ?,
+                hotness = ?,
+                processing_status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                int(model_result["is_fintech"]),
+                model_result["scale_score"],
+                model_result["urgency_score"],
+                model_result["rigidity_score"],
+                model_result["hotness"],
+                STATUS_MODELS_DONE,
+                signal["id"],
+            ),
+        )
+        updated_count += 1
+
+    if updated_count:
+        db.commit()
+    return {
+        "processed": updated_count,
+        "fintech": fintech_count,
+        "non_fintech": non_fintech_count,
+        "hotness_placeholder": -1,
+        "models": get_hotness_model_status(),
+    }
+
+
+def has_model_fields(signal):
+    return (
+        signal.get("is_fintech") is not None
+        and signal.get("scale_score") is not None
+        and signal.get("urgency_score") is not None
+        and signal.get("rigidity_score") is not None
+    )
 
 
 def is_report_signal(signal):
@@ -210,9 +350,14 @@ def load_raw_news_by_id(db, raw_news_ids):
     for chunk in chunked(ids, 500):
         placeholders = ",".join("?" for _ in chunk)
         rows = db.execute(f"""
-            SELECT id, published_at, parsed_at
-            FROM raw_news
-            WHERE id IN ({placeholders})
+            SELECT
+                rn.id,
+                rn.published_at,
+                rn.parsed_at,
+                COALESCE(s.authority_score, 0.5) AS authority_score
+            FROM raw_news rn
+            LEFT JOIN sources s ON s.id = rn.source_id
+            WHERE rn.id IN ({placeholders})
         """, chunk).fetchall()
         for row in rows:
             result[row["id"]] = dict(row)
@@ -235,6 +380,10 @@ def enrich_signal_metadata(signal, raw_news_by_id):
     else:
         signal["event_at"] = None
         signal["base_raw_news_id"] = min(source_ids) if source_ids else signal["id"]
+    signal["source_authority"] = max(
+        (float(raw_row.get("authority_score") or 0.5) for raw_row in raw_rows),
+        default=0.5,
+    )
 
 
 def embed_and_store_signals(db, signals, batch_size):
@@ -243,7 +392,7 @@ def embed_and_store_signals(db, signals, batch_size):
 
     usage_items = []
     embedded_count = 0
-    safe_batch_size = max(1, int(batch_size or DEFAULT_BATCH_SIZE))
+    safe_batch_size = max(1, int(batch_size or DEFAULT_EMBEDDING_BATCH_SIZE))
     for batch in chunked(signals, safe_batch_size):
         texts = [build_embedding_text(signal) for signal in batch]
         embeddings, usage = fetch_openrouter_embeddings(texts)
@@ -309,17 +458,18 @@ def fetch_openrouter_embeddings(texts):
 
 
 def store_signal_embedding(db, signal, embedding):
-    draft_data = parse_draft_json(signal.get("draft"))
-    if signal.get("draft") and not draft_data:
-        draft_data["previous_draft"] = clean_text(signal.get("draft"))
-    draft_data["embedding_model"] = OPENROUTER_EMBEDDING_MODEL
-    draft_data["embedding"] = embedding
-    draft_data["dedup_processed_at"] = datetime.now().isoformat(timespec="seconds")
-    serialized_draft = json.dumps(draft_data, ensure_ascii=False)
-    signal["draft"] = serialized_draft
+    embedding_data = {
+        "embedding_model": OPENROUTER_EMBEDDING_MODEL,
+        "embedding": embedding,
+        "embedded_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    serialized_embedding = json.dumps(embedding_data, ensure_ascii=False)
+    signal["embedding_json"] = serialized_embedding
+    signal["embedding"] = embedding
+    signal["processing_status"] = STATUS_EMBEDDING_DONE
     db.execute(
-        "UPDATE signals SET draft = ? WHERE id = ?",
-        (serialized_draft, signal["id"]),
+        "UPDATE signals SET embedding_json = ?, processing_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (serialized_embedding, signal["processing_status"], signal["id"]),
     )
 
 
@@ -510,7 +660,7 @@ def make_pca_summary(
 
 def signal_sort_key(signal):
     event_at = signal.get("event_at") or datetime.max
-    return (event_at, signal.get("base_raw_news_id") or signal["id"], signal["id"])
+    return (-float(signal.get("source_authority") or 0.5), event_at, signal.get("base_raw_news_id") or signal["id"], signal["id"])
 
 
 def get_duplicate_base_sort_key(candidates):
@@ -533,7 +683,7 @@ def is_currency_rates_signal(signal):
 
 def currency_rates_signal_sort_key(signal):
     event_at = signal.get("event_at") or datetime.min
-    return (datetime.max - event_at, -(signal.get("base_raw_news_id") or signal["id"]), -signal["id"])
+    return (-float(signal.get("source_authority") or 0.5), datetime.max - event_at, -(signal.get("base_raw_news_id") or signal["id"]), -signal["id"])
 
 
 def merge_duplicate_sources(db, base_signal, duplicate_signals):
@@ -541,59 +691,136 @@ def merge_duplicate_sources(db, base_signal, duplicate_signals):
     for duplicate_signal in duplicate_signals:
         source_ids.update(duplicate_signal.get("source_ids") or [])
     merged_sources = ",".join(str(raw_news_id) for raw_news_id in sorted(source_ids))
+    duplicate_group_id = make_duplicate_group_id(base_signal)
+    group_signals = [base_signal, *duplicate_signals]
+    source_authority = max(
+        (float(signal.get("source_authority") or 0.5) for signal in group_signals),
+        default=0.5,
+    )
+    scale_score = average_signal_score(group_signals, "scale_score")
+    urgency_score = average_signal_score(group_signals, "urgency_score")
+    rigidity_score = average_signal_score(group_signals, "rigidity_score")
     db.execute(
-        "UPDATE signals SET sources = ? WHERE id = ?",
-        (merged_sources, base_signal["id"]),
+        """
+        UPDATE signals
+        SET sources = ?,
+            duplicate_group_id = ?,
+            is_duplicate = 0,
+            duplicate_of = NULL,
+            scale_score = ?,
+            urgency_score = ?,
+            rigidity_score = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            merged_sources,
+            duplicate_group_id,
+            scale_score,
+            urgency_score,
+            rigidity_score,
+            base_signal["id"],
+        ),
     )
     base_signal["source_ids"] = sorted(source_ids)
+    base_signal["duplicate_group_id"] = duplicate_group_id
+    base_signal["scale_score"] = scale_score
+    base_signal["urgency_score"] = urgency_score
+    base_signal["rigidity_score"] = rigidity_score
+    base_signal["source_authority"] = source_authority
     db.commit()
+
+
+def average_signal_score(signals, field):
+    weighted_sum = 0.0
+    total_weight = 0
+    for signal in signals:
+        value = coerce_float(signal.get(field))
+        if value is not None and value >= 0:
+            weight = max(1, len(signal.get("source_ids") or []))
+            weighted_sum += value * weight
+            total_weight += weight
+    if not total_weight:
+        return -1.0 if field == "hotness" else None
+    return round(float(np.clip(weighted_sum / total_weight, 0.0, 5.0)), 2)
 
 
 def mark_duplicate_signals(db, base_signal, duplicate_signals):
-    duplicate_draft = f"{DUPLICATE_PREFIX}{base_signal['base_raw_news_id']}"
+    duplicate_group_id = make_duplicate_group_id(base_signal)
     for duplicate_signal in duplicate_signals:
         db.execute(
-            "UPDATE signals SET draft = ? WHERE id = ?",
-            (duplicate_draft, duplicate_signal["id"]),
+            """
+            UPDATE signals
+            SET is_duplicate = 1,
+                duplicate_of = ?,
+                duplicate_group_id = ?,
+                draft = '',
+                processing_status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (base_signal["id"], duplicate_group_id, STATUS_DUPLICATE, duplicate_signal["id"]),
         )
     db.commit()
 
 
-def mark_signals_dedup_checked(db, signals):
-    checked_at = datetime.now().isoformat(timespec="seconds")
+def mark_signals_dedup_done(db, signals):
     for signal in signals:
-        if signal.get("dedup_checked"):
+        if signal.get("processing_status") == STATUS_DEDUP_DONE:
             continue
-        row = db.execute(
-            "SELECT draft FROM signals WHERE id = ?",
-            (signal["id"],),
-        ).fetchone()
-        current_draft = row["draft"] if row else signal.get("draft")
-        draft_data = parse_draft_json(current_draft)
-        if current_draft and not draft_data:
-            draft_data["previous_draft"] = clean_text(current_draft)
-        draft_data["dedup_checked_at"] = checked_at
-        signal["draft"] = json.dumps(draft_data, ensure_ascii=False)
+        signal["processing_status"] = STATUS_DEDUP_DONE
         db.execute(
-            "UPDATE signals SET draft = ? WHERE id = ?",
-            (signal["draft"], signal["id"]),
+            "UPDATE signals SET processing_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (STATUS_DEDUP_DONE, signal["id"]),
         )
     db.commit()
 
 
-def parse_draft_json(value):
-    if not value or is_duplicate_draft(value):
+def update_final_hotness_scores(db, signals):
+    updated = 0
+    skipped = 0
+    for signal in signals:
+        if signal.get("is_duplicate") or not bool(signal.get("is_fintech")):
+            skipped += 1
+            continue
+        if not has_model_fields(signal):
+            skipped += 1
+            continue
+
+        hotness = predict_hotness_score(
+            signal.get("scale_score"),
+            signal.get("urgency_score"),
+            signal.get("rigidity_score"),
+            duplicate_count=max(1, len(signal.get("source_ids") or [])),
+            authority_score=signal.get("source_authority") or 0.5,
+        )
+        signal["hotness"] = hotness
+        db.execute(
+            "UPDATE signals SET hotness = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (hotness, signal["id"]),
+        )
+        updated += 1
+    if updated:
+        db.commit()
+    return {
+        "updated": updated,
+        "skipped": skipped,
+    }
+
+
+def make_duplicate_group_id(base_signal):
+    base_raw_news_id = base_signal.get("base_raw_news_id") or base_signal.get("id")
+    return f"dup-{base_raw_news_id}"
+
+
+def parse_embedding_json(value):
+    if not value:
         return {}
     try:
         parsed = json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-def is_duplicate_draft(value):
-    return str(value or "").strip().startswith(DUPLICATE_PREFIX)
-
 
 def parse_source_ids(value):
     if value is None or value == "":

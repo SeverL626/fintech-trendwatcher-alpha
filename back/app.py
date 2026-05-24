@@ -65,18 +65,16 @@ def options_response(_path=None):
 
 @app.route("/")
 def hello():
+    update = get_update_overview()
     return jsonify({
         "ok": True,
         "service": "Fintech Trendwatcher",
-        "current_time": {
-            "timezone": "Europe/Moscow",
-            "iso": now_msk().isoformat(timespec="seconds"),
-        },
-        "update": get_update_overview(),
+        "time_msk": now_msk().isoformat(timespec="seconds"),
+        "next_update_at": update.get("next_run_at"),
         "routes": [
-            "/update",
-            "/update/status",
-            "/signals",
+            {"method": "GET", "path": "/signals", "description": "debug signals feed"},
+            {"method": "GET", "path": "/update/status?token=...", "description": "update status"},
+            {"method": "GET", "path": "/update", "description": "start update"},
         ],
     })
 
@@ -240,10 +238,25 @@ def api_admin_promo_code_update(promo_id):
 
 def list_frontend_signals(db_path, limit):
     with connect_db(db_path) as db:
-        signal_rows = db.execute("""
-            SELECT id, headline, hotness, why_now, category, sources, summary, draft
+        not_duplicate_where = signal_not_duplicate_where(db)
+        visible_where = signal_frontend_visible_where(db)
+        signal_rows = db.execute(f"""
+            SELECT
+                id,
+                headline,
+                hotness,
+                why_now,
+                category,
+                sources,
+                summary,
+                draft,
+                is_fintech,
+                scale_score,
+                urgency_score,
+                rigidity_score
             FROM signals
-            WHERE draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %'
+            WHERE {not_duplicate_where}
+              AND {visible_where}
             ORDER BY id DESC
             LIMIT ?
         """, (limit,)).fetchall()
@@ -260,6 +273,10 @@ def list_frontend_signals(db_path, limit):
                 "id": signal["id"],
                 "headline": signal.get("headline"),
                 "hotness": signal.get("hotness"),
+                "is_fintech": bool(signal.get("is_fintech")),
+                "scale_score": signal.get("scale_score"),
+                "urgency_score": signal.get("urgency_score"),
+                "rigidity_score": signal.get("rigidity_score"),
                 "why_now": signal.get("why_now"),
                 "category": signal.get("category"),
                 "summary": signal.get("summary"),
@@ -273,6 +290,25 @@ def list_frontend_signals(db_path, limit):
                 "raw_news_ids": parse_signal_source_ids(signal.get("sources")),
             })
         return items
+
+
+def signal_frontend_visible_where(db):
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(signals)").fetchall()}
+    if "is_fintech" not in columns:
+        return "hotness >= 2"
+    if "processing_status" in columns:
+        return "(COALESCE(is_fintech, 0) = 1 OR processing_status IN ('llm_done', 'embedding_done'))"
+    return "COALESCE(is_fintech, 0) = 1"
+
+
+def signal_not_duplicate_where(db):
+    try:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(signals)").fetchall()}
+    except Exception:
+        columns = set()
+    if "is_duplicate" in columns:
+        return "COALESCE(is_duplicate, 0) = 0"
+    return "(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"
 
 
 def make_auth_payload(payload):
@@ -463,6 +499,15 @@ def run_duplicates_from_db(db_path):
     return process_signal_duplicates(db_path)
 
 
+def run_weekly_digest_from_db(db_path, current_time=None):
+    try:
+        from model.weekly_news_summary import generate_missing_weekly_digests
+    except ModuleNotFoundError:
+        from weekly_news_summary import generate_missing_weekly_digests
+
+    return generate_missing_weekly_digests(db_path, current_time=current_time)
+
+
 def ensure_model_configured():
     try:
         from model.signal_processor import ensure_model_configured as check_configured
@@ -474,6 +519,33 @@ def ensure_model_configured():
 
 def now_msk():
     return datetime.now(MSK_TZ)
+
+
+def should_run_weekly_digest(db_path, trigger, started_at):
+    if UPDATE_PARSER_ONLY:
+        return False
+    if is_weekly_digest_first_run(db_path):
+        return True
+    if trigger != "auto":
+        return False
+    started_at = started_at.astimezone(MSK_TZ) if started_at.tzinfo else started_at.replace(tzinfo=MSK_TZ)
+    return started_at.weekday() == 0 and started_at.hour == 0
+
+
+def is_weekly_digest_first_run(db_path):
+    try:
+        with connect_db(db_path) as db:
+            table_row = db.execute("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'weekly_digests'
+            """).fetchone()
+            if not table_row:
+                return True
+            count_row = db.execute("SELECT COUNT(*) AS count FROM weekly_digests").fetchone()
+            return int(count_row["count"] or 0) == 0
+    except Exception:
+        return False
 
 
 def get_parser_update_settings():
@@ -514,15 +586,21 @@ def get_model_update_settings():
 
 def get_update_settings():
     current_time = now_msk()
+    stages = ["parser"] if UPDATE_PARSER_ONLY else ["parser", "model", "duplicates", "weekly_digest"]
     return {
         "enabled": True,
         "timezone": "Europe/Moscow",
         "schedule": [f"{hour:02d}:00" for hour in PARSER_SCHEDULE_HOURS],
         "period_hours": PARSER_PERIOD_HOURS,
         "stale_lock_after_minutes": UPDATE_TIMEOUT_SECONDS // 60,
-        "stages": ["parser"] if UPDATE_PARSER_ONLY else ["parser", "model", "duplicates"],
+        "stages": stages,
         "model_max_requests_per_run": "all",
         "embedding_model": OPENROUTER_EMBEDDING_MODEL,
+        "weekly_digest": {
+            "schedule": "Monday 00:00 Europe/Moscow, after update stages",
+            "news_limit": 15,
+            "model": MODEL_OPENROUTER_MODEL,
+        },
         "parser_only": UPDATE_PARSER_ONLY,
         "manual_cooldown_minutes": UPDATE_MANUAL_COOLDOWN_SECONDS // 60,
         "manual_cooldown_scope": "previous update start, manual or auto",
@@ -554,6 +632,13 @@ def get_update_overview():
                 "description": "Merges semantic duplicates and marks secondary signals",
                 "provider": "openrouter",
                 "model": OPENROUTER_EMBEDDING_MODEL,
+            },
+            {
+                "name": "weekly_digest",
+                "description": "Builds a weekly digest every Monday 00:00 after parser/model/duplicates",
+                "provider": "openrouter",
+                "model": MODEL_OPENROUTER_MODEL,
+                "news_limit": 15,
             },
         ])
 
@@ -785,7 +870,69 @@ def run_update_job_with_lock(trigger, started_at):
         result=duplicates_result,
     )
 
+    digest_summary = None
+    if should_run_weekly_digest(app.config["DB_PATH"], trigger, started_at):
+        save_update_stage_status(trigger, started_at, "weekly_digest", "running")
+        digest_started_at = now_msk()
+        try:
+            digest_result = run_weekly_digest_from_db(app.config["DB_PATH"], started_at)
+            digest_finished_at = now_msk()
+            digest_summary = make_digest_stage_summary(digest_result)
+            save_update_stage_status(
+                trigger,
+                started_at,
+                "weekly_digest",
+                "finished",
+                started_at=digest_started_at,
+                finished_at=digest_finished_at,
+                summary=digest_summary,
+                result=digest_result,
+            )
+        except Exception as error:
+            digest_finished_at = now_msk()
+            digest_summary = {
+                "created": 0,
+                "errors": 1,
+                "error": str(error),
+            }
+            save_update_stage_status(
+                trigger,
+                started_at,
+                "weekly_digest",
+                "failed",
+                started_at=digest_started_at,
+                finished_at=digest_finished_at,
+                summary=digest_summary,
+                error=error,
+            )
+
     finished_at = now_msk()
+    summary = {
+        "parser": parser_summary,
+        "model": model_summary,
+        "duplicates": duplicates_summary,
+    }
+    stages = {
+        "parser": {
+            "state": "finished",
+            "summary": parser_summary,
+        },
+        "model": {
+            "state": "finished",
+            "summary": model_summary,
+        },
+        "duplicates": {
+            "state": "finished",
+            "summary": duplicates_summary,
+        },
+    }
+    if digest_summary is not None:
+        summary["weekly_digest"] = digest_summary
+        stages["weekly_digest"] = {
+            "state": "failed" if digest_summary.get("errors") else "finished",
+            "summary": digest_summary,
+        }
+
     result = {
         "state": "finished",
         "message": "Update finished",
@@ -794,25 +941,8 @@ def run_update_job_with_lock(trigger, started_at):
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "duration_seconds": max(0, int((finished_at - started_at).total_seconds())),
         "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
-        "summary": {
-            "parser": parser_summary,
-            "model": model_summary,
-            "duplicates": duplicates_summary,
-        },
-        "stages": {
-            "parser": {
-                "state": "finished",
-                "summary": parser_summary,
-            },
-            "model": {
-                "state": "finished",
-                "summary": model_summary,
-            },
-            "duplicates": {
-                "state": "finished",
-                "summary": duplicates_summary,
-            },
-        },
+        "summary": summary,
+        "stages": stages,
     }
     save_update_status(result)
     return result
@@ -821,11 +951,11 @@ def run_update_job_with_lock(trigger, started_at):
 def get_update_status():
     status = load_update_status()
     if not status:
-        return {
+        return attach_update_model_status({
             "state": "idle",
             "message": "Update has not been started yet",
             "stale_lock_after_seconds": UPDATE_TIMEOUT_SECONDS,
-        }
+        })
 
     if is_unfinished_running_status(status):
         if is_runtime_lock_interrupted():
@@ -841,7 +971,7 @@ def get_update_status():
             mark_running_stages_interrupted(status)
             save_update_status(status)
             remove_stale_parser_lock(force=True)
-            return status
+            return attach_update_model_status(status)
 
         status["state"] = "running"
         started_at = parse_msk_datetime(status.get("started_at"))
@@ -852,7 +982,56 @@ def get_update_status():
             status["stale_lock_after_seconds"] = UPDATE_TIMEOUT_SECONDS
             save_update_status(status)
 
+    return attach_update_model_status(status)
+
+
+def attach_update_model_status(status):
+    pipeline_stages = ["parser"] if UPDATE_PARSER_ONLY else [
+        "parser",
+        "llm",
+        "embeddings",
+        "fintech_model",
+        "feature_models",
+        "duplicates",
+        "hotness",
+        "weekly_digest",
+    ]
+    status["pipeline"] = {
+        "stages": pipeline_stages,
+        "llm": "headline + summary + category + why_now",
+        "embeddings": OPENROUTER_EMBEDDING_MODEL,
+        "fintech": "predicts is_fintech; non-fintech stops after this stage",
+        "features": ["scale_score", "urgency_score", "rigidity_score"],
+        "hotness": "linear regressor over feature scores, duplicate count and source authority",
+        "duplicates": "fintech-only semantic deduplication",
+        "weekly_digest": "top-15 non-duplicate fintech signals every Monday 00:00 MSK",
+    }
+    status["models"] = get_update_model_status()
     return status
+
+
+def get_update_model_status():
+    try:
+        from model.hotness_inference import get_hotness_model_status
+    except ModuleNotFoundError:
+        from hotness_inference import get_hotness_model_status
+
+    try:
+        model_status = get_hotness_model_status()
+        return {
+            "ok": (
+                model_status["fintech_model"]["exists"]
+                and all(item["exists"] for item in model_status["feature_models"].values())
+                and model_status["hotness_model"].get("exists")
+                and model_status["hotness_model"].get("status") == "ready"
+            ),
+            **model_status,
+        }
+    except Exception as error:
+        return {
+            "ok": False,
+            "error": str(error),
+        }
 
 
 def get_status_duration_seconds(status, finished_at):
@@ -902,6 +1081,11 @@ def save_update_running_status(trigger, started_at):
             "model": {"state": "pending", "message": "Model has not started yet"},
             "duplicates": {"state": "pending", "message": "Duplicates has not started yet"},
         })
+        if should_run_weekly_digest(app.config["DB_PATH"], trigger, started_at):
+            stages["weekly_digest"] = {
+                "state": "pending",
+                "message": "Weekly digest has not started yet",
+            }
 
     save_update_status({
         "state": "running",
@@ -1009,18 +1193,42 @@ def make_model_stage_summary(result):
 
 def make_duplicates_stage_summary(result):
     openrouter_usage = result.get("openrouter") or {}
+    model_summary = result.get("models") or {}
+    hotness_summary = result.get("hotness") or {}
     return {
         "lookback_signals": result.get("lookback_signals", 0),
         "processed_signals": result.get("processed_signals", 0),
         "compared_signals": result.get("compared_signals", 0),
         "excluded_signals": result.get("excluded_signals", 0),
         "embedded_signals": result.get("embedded_signals", 0),
+        "models_processed": model_summary.get("processed", result.get("models_processed", 0)),
+        "fintech_signals": model_summary.get("fintech"),
+        "non_fintech_signals": model_summary.get("non_fintech"),
+        "hotness_updated": hotness_summary.get("updated"),
         "duplicates_marked": result.get("duplicates_marked", 0),
         "merged_sources": result.get("merged_sources", 0),
         "embedding_model": result.get("embedding_model", OPENROUTER_EMBEDDING_MODEL),
         "pca": result.get("pca"),
         "run_cost": openrouter_usage.get("run_cost"),
         "requests_sent": openrouter_usage.get("requests_sent"),
+    }
+
+
+def make_digest_stage_summary(result):
+    return {
+        "created": result.get("created", 0),
+        "skipped_existing": result.get("skipped_existing", 0),
+        "skipped_empty": result.get("skipped_empty", 0),
+        "errors": result.get("errors", 0),
+        "mode": result.get("mode"),
+        "first_run": result.get("first_run"),
+        "checked_weeks": result.get("checked_weeks"),
+        "week_start": result.get("week_start"),
+        "week_end": result.get("week_end"),
+        "digest_id": result.get("digest_id"),
+        "news_selected": result.get("news_selected", 0),
+        "model": result.get("model", MODEL_OPENROUTER_MODEL),
+        "run_cost": result.get("run_cost"),
     }
 
 
@@ -1031,6 +1239,8 @@ def compact_stage_result(stage, result):
         return make_model_stage_summary(result)
     if stage == "duplicates":
         return make_duplicates_stage_summary(result)
+    if stage == "weekly_digest":
+        return make_digest_stage_summary(result)
     return result
 
 

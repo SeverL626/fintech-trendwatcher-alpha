@@ -86,6 +86,7 @@ class User(db.Model):
     subscription_status = db.Column(db.String(40), default="inactive")
     subscription_expires_at = db.Column(db.DateTime, nullable=True)
     demo_used = db.Column(db.Boolean, default=False)
+    last_notification_check = db.Column(db.DateTime, nullable=True)
     avatar_url = db.Column(db.Text, default="")
     bio = db.Column(db.Text, default="")
 
@@ -239,6 +240,13 @@ def parse_int(value, default=0):
         return default
 
 
+def parse_float(value, default=None):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def normalize_api_limit(value, default=100, maximum=MAX_API_LIMIT):
     try:
         limit = int(value)
@@ -274,6 +282,53 @@ def connect_main_db():
         yield connection
     finally:
         connection.close()
+
+
+def table_has_column(connection, table_name, column_name):
+    try:
+        rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.Error:
+        return False
+    return any(row["name"] == column_name for row in rows)
+
+
+def signal_not_duplicate_where(connection, alias=""):
+    prefix = f"{alias}." if alias else ""
+    if table_has_column(connection, "signals", "is_duplicate"):
+        return f"COALESCE({prefix}is_duplicate, 0) = 0"
+    return f"({prefix}draft IS NULL OR {prefix}draft NOT LIKE 'DUBLICATE OF %')"
+
+
+def signal_frontend_visible_where(connection, alias=""):
+    prefix = f"{alias}." if alias else ""
+    if not table_has_column(connection, "signals", "is_fintech"):
+        return f"{prefix}hotness >= 2"
+    if table_has_column(connection, "signals", "processing_status"):
+        return (
+            f"(COALESCE({prefix}is_fintech, 0) = 1 "
+            f"OR {prefix}processing_status IN ('llm_done', 'embedding_done'))"
+        )
+    return f"COALESCE({prefix}is_fintech, 0) = 1"
+
+
+def signal_select_fields(connection, alias=""):
+    prefix = f"{alias}." if alias else ""
+    fields = [
+        f"{prefix}id",
+        f"{prefix}headline",
+        f"{prefix}hotness",
+        f"{prefix}why_now",
+        f"{prefix}category",
+        f"{prefix}sources",
+        f"{prefix}summary",
+        f"{prefix}draft",
+    ]
+    for column in ("is_fintech", "scale_score", "urgency_score", "rigidity_score"):
+        if table_has_column(connection, "signals", column):
+            fields.append(f"{prefix}{column}")
+    if table_has_column(connection, "signals", "created_at"):
+        fields.append(f"{prefix}created_at AS signal_created_at")
+    return ", ".join(fields)
 
 
 
@@ -389,6 +444,10 @@ def signal_to_frontend_item(signal, raw_news=None):
         "id": signal["id"],
         "headline": signal.get("headline"),
         "hotness": signal.get("hotness"),
+        "is_fintech": bool(signal.get("is_fintech")),
+        "scale_score": signal.get("scale_score"),
+        "urgency_score": signal.get("urgency_score"),
+        "rigidity_score": signal.get("rigidity_score"),
         "why_now": signal.get("why_now"),
         "category": signal.get("category"),
         "summary": signal.get("summary"),
@@ -401,6 +460,7 @@ def signal_to_frontend_item(signal, raw_news=None):
         "url": primary_raw.get("url"),
         "published_at": to_moscow_iso(primary_raw.get("published_at") or primary_raw.get("parsed_at")),
         "created_at": to_moscow_iso(primary_raw.get("parsed_at")),
+        "signal_created_at": to_moscow_iso(signal.get("signal_created_at")),
         "raw_news_ids": source_ids,
     }
 
@@ -440,6 +500,7 @@ def signal_matches_filters(item, query="", categories=None, sources=None, hotnes
         age = utcnow() - event_time
         ranges = {
             "day": timedelta(days=1),
+            "3d": timedelta(days=3),
             "week": timedelta(days=7),
             "month": timedelta(days=30),
         }
@@ -461,7 +522,7 @@ def sort_signal_items(items, sort_by="time_desc"):
     if sort_by == "hotness":
         items.sort(
             key=lambda item: (
-                parse_int(item.get("hotness")),
+                signal_score_value(item),
                 signal_sort_time(item),
                 parse_int(item.get("id")),
             ),
@@ -471,6 +532,19 @@ def sort_signal_items(items, sort_by="time_desc"):
     items.sort(key=lambda item: (signal_sort_time(item), parse_int(item.get("id"))), reverse=True)
 
 
+def signal_score_value(item):
+    hotness = parse_float(item.get("hotness"), -1.0)
+    if hotness is not None and hotness >= 0:
+        return hotness
+    values = [
+        parse_float(item.get("scale_score")),
+        parse_float(item.get("urgency_score")),
+        parse_float(item.get("rigidity_score")),
+    ]
+    values = [value for value in values if value is not None]
+    return sum(values) / len(values) if values else -1.0
+
+
 def list_main_signals_page(
     limit=100,
     offset=0,
@@ -478,6 +552,14 @@ def list_main_signals_page(
     category="",
     source="",
     hotness="",
+    hotness_min="",
+    hotness_max="",
+    scale_min="",
+    scale_max="",
+    urgency_min="",
+    urgency_max="",
+    rigidity_min="",
+    rigidity_max="",
     time_range="",
     sort_by="time_desc",
 ):
@@ -487,24 +569,38 @@ def list_main_signals_page(
     offset = max(0, parse_int(offset, 0))
     categories = parse_multi_values(category)
     sources = parse_multi_values(source)
-    hotness_values = [value for value in parse_multi_values(hotness) if parse_int(value) >= 2]
-    where = [
-        "(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')",
-        "hotness >= 2",
-    ]
+    hotness_values = parse_multi_values(hotness)
+    score_filters = {
+        "hotness": (parse_float(hotness_min), parse_float(hotness_max)),
+        "scale_score": (parse_float(scale_min), parse_float(scale_max)),
+        "urgency_score": (parse_float(urgency_min), parse_float(urgency_max)),
+        "rigidity_score": (parse_float(rigidity_min), parse_float(rigidity_max)),
+    }
     params = []
-    if categories:
-        where.append(f"category IN ({','.join('?' for _ in categories)})")
-        params.extend(categories)
-    if hotness_values:
-        where.append(f"hotness IN ({','.join('?' for _ in hotness_values)})")
-        params.extend(parse_int(value) for value in hotness_values)
-
-    sql_where = " AND ".join(where)
     items = []
     with connect_main_db() as connection:
+        where = [
+            signal_not_duplicate_where(connection),
+            signal_frontend_visible_where(connection),
+        ]
+        if categories:
+            where.append(f"category IN ({','.join('?' for _ in categories)})")
+            params.extend(categories)
+        if hotness_values:
+            where.append(f"hotness IN ({','.join('?' for _ in hotness_values)})")
+            params.extend(parse_float(value, -999) for value in hotness_values)
+        for field, (minimum, maximum) in score_filters.items():
+            if minimum is not None and table_has_column(connection, "signals", field):
+                where.append(f"COALESCE({field}, -1) >= ?")
+                params.append(minimum)
+            if maximum is not None and table_has_column(connection, "signals", field):
+                where.append(f"COALESCE({field}, -1) <= ?")
+                params.append(maximum)
+
+        sql_where = " AND ".join(where)
+        select_fields = signal_select_fields(connection)
         signal_rows = connection.execute(f"""
-            SELECT id, headline, hotness, why_now, category, sources, summary, draft
+            SELECT {select_fields}
             FROM signals
             WHERE {sql_where}
             """, params).fetchall()
@@ -554,6 +650,102 @@ def load_update_status_snapshot():
     return {}
 
 
+def ensure_weekly_digest_table(connection):
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS weekly_digests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            week_start TEXT NOT NULL,
+            week_end TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            report TEXT NOT NULL DEFAULT '',
+            moex_summary TEXT NOT NULL DEFAULT '',
+            news_ids TEXT NOT NULL DEFAULT '[]',
+            model TEXT NOT NULL DEFAULT '',
+            prompt_version TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(week_start)
+        )
+    """)
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(weekly_digests)").fetchall()
+    }
+    for column_name, column_type in {
+        "week_start": "TEXT",
+        "week_end": "TEXT",
+        "title": "TEXT NOT NULL DEFAULT ''",
+        "summary": "TEXT NOT NULL DEFAULT ''",
+        "report": "TEXT NOT NULL DEFAULT ''",
+        "moex_summary": "TEXT NOT NULL DEFAULT ''",
+        "news_ids": "TEXT NOT NULL DEFAULT '[]'",
+        "model": "TEXT NOT NULL DEFAULT ''",
+        "prompt_version": "TEXT NOT NULL DEFAULT ''",
+        "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    }.items():
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE weekly_digests ADD COLUMN {column_name} {column_type}")
+
+
+def parse_digest_news_ids(value):
+    try:
+        parsed = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        parsed = []
+    if not isinstance(parsed, list):
+        parsed = []
+    result = []
+    for item in parsed:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def list_weekly_digests(limit=20, offset=0):
+    if not MAIN_DB_PATH.exists():
+        return {"items": [], "has_more": False}
+
+    limit = normalize_api_limit(limit, 20, maximum=100)
+    offset = max(0, parse_int(offset, 0))
+    with connect_main_db() as connection:
+        ensure_weekly_digest_table(connection)
+        connection.commit()
+        rows = connection.execute("""
+            SELECT
+                id,
+                week_start,
+                week_end,
+                title,
+                summary,
+                report,
+                moex_summary,
+                news_ids,
+                model,
+                prompt_version,
+                created_at,
+                updated_at
+            FROM weekly_digests
+            ORDER BY date(week_start) DESC, id DESC
+            LIMIT ? OFFSET ?
+        """, (limit + 1, offset)).fetchall()
+
+    items = []
+    for row in rows[:limit]:
+        item = dict(row)
+        item["news_ids"] = parse_digest_news_ids(item.get("news_ids"))
+        item["created_at"] = to_moscow_iso(item.get("created_at"))
+        item["updated_at"] = to_moscow_iso(item.get("updated_at"))
+        items.append(item)
+    return {
+        "items": items,
+        "has_more": len(rows) > limit,
+    }
+
+
 def get_main_overview():
     overview = {
         "observations": 0,
@@ -585,23 +777,25 @@ def get_main_overview():
         if raw_row:
             overview["observations"] = raw_row["observations"] or 0
 
-        signal_stats_row = connection.execute("""
+        not_duplicate_where = signal_not_duplicate_where(connection, "s")
+        visible_condition = signal_frontend_visible_where(connection, "s")
+        signal_stats_row = connection.execute(f"""
             SELECT
                 SUM(CASE
-                    WHEN s.hotness > 1
+                    WHEN {visible_condition}
                      AND datetime(COALESCE(rn.parsed_at, rn.published_at)) >= datetime(?)
                     THEN 1 ELSE 0
                 END) AS last_24h,
                 SUM(CASE
-                    WHEN s.hotness > 1
+                    WHEN {visible_condition}
                      AND datetime(COALESCE(rn.parsed_at, rn.published_at)) >= datetime(?)
                     THEN 1 ELSE 0
                 END) AS last_7d,
                 COUNT(DISTINCT CASE WHEN s.category IS NOT NULL AND TRIM(s.category) != '' THEN s.category END) AS categories,
-                SUM(CASE WHEN s.hotness >= 4 THEN 1 ELSE 0 END) AS important
+                SUM(CASE WHEN {visible_condition} THEN 1 ELSE 0 END) AS important
             FROM signals s
             LEFT JOIN raw_news rn ON rn.id = CAST(s.sources AS INTEGER)
-            WHERE (s.draft IS NULL OR s.draft NOT LIKE 'DUBLICATE OF %')
+            WHERE {not_duplicate_where}
         """, (last_24h_text, last_7d_text)).fetchone()
         if signal_stats_row:
             overview["processed_last_24h"] = signal_stats_row["last_24h"] or 0
@@ -661,11 +855,13 @@ def get_main_signal(signal_id):
         return None
 
     with connect_main_db() as connection:
-        row = connection.execute("""
-            SELECT id, headline, hotness, why_now, category, sources, summary, draft
+        select_fields = signal_select_fields(connection)
+        not_duplicate_where = signal_not_duplicate_where(connection)
+        row = connection.execute(f"""
+            SELECT {select_fields}
             FROM signals
             WHERE id = ?
-              AND (draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')
+              AND {not_duplicate_where}
         """, (signal_id,)).fetchone()
         if not row:
             return None
@@ -678,10 +874,13 @@ def count_main_signals():
     if not MAIN_DB_PATH.exists():
         return 0
     with connect_main_db() as connection:
-        row = connection.execute("""
+        not_duplicate_where = signal_not_duplicate_where(connection)
+        visible_where = signal_frontend_visible_where(connection)
+        row = connection.execute(f"""
             SELECT COUNT(*) AS count
             FROM signals
-            WHERE draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %'
+            WHERE {not_duplicate_where}
+              AND {visible_where}
         """).fetchone()
         return row["count"] if row else 0
 
@@ -1064,7 +1263,7 @@ def ensure_frontend_schema():
     with db.engine.begin() as connection:
         user_columns = {
             row[1]
-            for row in connection.exec_driver_sql("PRAGMA table_info(user)").fetchall()
+            for row in connection.exec_driver_sql('PRAGMA table_info("user")').fetchall()
         }
         if "subscription_plan" not in user_columns:
             connection.exec_driver_sql("ALTER TABLE user ADD COLUMN subscription_plan TEXT DEFAULT ''")
@@ -1074,6 +1273,12 @@ def ensure_frontend_schema():
             connection.exec_driver_sql("ALTER TABLE user ADD COLUMN subscription_expires_at DATETIME")
         if "demo_used" not in user_columns:
             connection.exec_driver_sql("ALTER TABLE user ADD COLUMN demo_used BOOLEAN DEFAULT 0")
+        if "last_notification_check" not in user_columns:
+            connection.exec_driver_sql("ALTER TABLE user ADD COLUMN last_notification_check DATETIME")
+            connection.exec_driver_sql(
+                "UPDATE user SET last_notification_check = ? WHERE last_notification_check IS NULL",
+                (utcnow(),),
+            )
         connection.exec_driver_sql("""
             UPDATE user
             SET demo_used = 1
@@ -1083,7 +1288,7 @@ def ensure_frontend_schema():
 
         notification_columns = {
             row[1]
-            for row in connection.exec_driver_sql("PRAGMA table_info(notification_item)").fetchall()
+            for row in connection.exec_driver_sql('PRAGMA table_info("notification_item")').fetchall()
         }
         if "created_at" not in notification_columns:
             connection.exec_driver_sql("ALTER TABLE notification_item ADD COLUMN created_at DATETIME")
@@ -1104,6 +1309,7 @@ def upsert_seed_users():
         user.subscription_status = item.get("subscription_status", ACTIVE_SUBSCRIPTION)
         user.subscription_expires_at = item.get("subscription_expires_at")
         user.demo_used = bool(item.get("demo_used", user.subscription_plan == DEMO_PLAN))
+        user.last_notification_check = user.last_notification_check or utcnow()
     db.session.commit()
 
 
@@ -1128,22 +1334,42 @@ def signal_value(signal, key, default=None):
 def signal_matches_rule(signal, rule: NotificationSetting) -> bool:
     if rule.theme and rule.theme != signal_value(signal, "category", ""):
         return False
-    if rule.source_name and rule.source_name != signal_value(signal, "source_name", ""):
-        return False
+    if rule.source_name:
+        sources = signal_value(signal, "sources", []) or []
+        if isinstance(sources, str):
+            sources = [sources]
+        source_name = signal_value(signal, "source_name", "")
+        if rule.source_name != source_name and rule.source_name not in sources:
+            return False
     if rule.hotness_min and parse_int(signal_value(signal, "hotness", 0)) < rule.hotness_min:
         return False
     return True
 
 
-def rebuild_notifications_for_user(user: User):
+def get_user_notification_cutoff(user: User):
+    cutoff = parse_datetime(user.last_notification_check)
+    if cutoff:
+        return cutoff
+    state = ensure_state()
+    return parse_datetime(state.last_signal_check) or utcnow()
+
+
+def signal_notification_time(signal):
+    return parse_datetime(
+        signal.get("signal_created_at")
+        or signal.get("created_at")
+        or signal.get("published_at")
+    )
+
+
+def rebuild_notifications_for_user(user: User, advance_cursor=True):
     if not user or not user.activated:
         return []
 
-    state = ensure_state()
-    cutoff = parse_datetime(state.last_signal_check) or utcnow()
+    cutoff = get_user_notification_cutoff(user)
     new_signals = []
     for signal in list_main_signals(limit=MAX_API_LIMIT):
-        event_time = parse_datetime(signal.get("created_at") or signal.get("published_at"))
+        event_time = signal_notification_time(signal)
         if event_time and event_time > cutoff:
             new_signals.append(signal)
 
@@ -1151,14 +1377,7 @@ def rebuild_notifications_for_user(user: User):
     created_items = []
 
     for signal in new_signals:
-        matched = False
-
-        if rules:
-            matched = any(signal_matches_rule(signal, rule) for rule in rules)
-        else:
-            matched = True
-
-        if matched:
+        if any(signal_matches_rule(signal, rule) for rule in rules):
             exists = NotificationItem.query.filter_by(user_id=user.id, signal_id=signal["id"]).first()
             if not exists:
                 item = NotificationItem(
@@ -1173,20 +1392,21 @@ def rebuild_notifications_for_user(user: User):
                 db.session.add(item)
                 created_items.append(item)
 
+    if advance_cursor:
+        max_signal_time = max(
+            [signal_notification_time(signal) for signal in new_signals if signal_notification_time(signal)]
+            or [cutoff]
+        )
+        user.last_notification_check = max_signal_time if new_signals else utcnow()
     db.session.commit()
     return created_items
 
 
 def rebuild_notifications_for_all_users():
     state = ensure_state()
-    before = parse_datetime(state.last_signal_check) or utcnow()
-    max_seen = before
     for user in User.query.all():
-        for item in rebuild_notifications_for_user(user):
-            item_time = parse_datetime(item.created_at)
-            if item_time and item_time > max_seen:
-                max_seen = item_time
-    state.last_signal_check = max(utcnow(), max_seen)
+        rebuild_notifications_for_user(user)
+    state.last_signal_check = utcnow()
     db.session.commit()
 
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
@@ -1277,6 +1497,13 @@ def create_app(test_config=None):
             payload = {"ok": response.ok, "message": response.text}
         return jsonify(payload), response.status_code
 
+    @app.get("/api/digests")
+    def get_digests():
+        return jsonify(list_weekly_digests(
+            limit=request.args.get("limit") or 20,
+            offset=request.args.get("offset") or 0,
+        ))
+
     @app.get("/api/metrics")
     def metrics():
         return jsonify({
@@ -1333,6 +1560,14 @@ def create_app(test_config=None):
             category=(request.args.get("category") or "").strip(),
             source=(request.args.get("source") or "").strip(),
             hotness=(request.args.get("hotness") or "").strip(),
+            hotness_min=(request.args.get("hotness_min") or "").strip(),
+            hotness_max=(request.args.get("hotness_max") or "").strip(),
+            scale_min=(request.args.get("scale_min") or "").strip(),
+            scale_max=(request.args.get("scale_max") or "").strip(),
+            urgency_min=(request.args.get("urgency_min") or "").strip(),
+            urgency_max=(request.args.get("urgency_max") or "").strip(),
+            rigidity_min=(request.args.get("rigidity_min") or "").strip(),
+            rigidity_max=(request.args.get("rigidity_max") or "").strip(),
             time_range=(request.args.get("time_range") or "").strip(),
             sort_by=(request.args.get("sort") or "time_desc").strip(),
         )
@@ -1556,7 +1791,7 @@ def create_app(test_config=None):
             if hotness_min in ("", None):
                 hotness_min = 0
             else:
-                hotness_min = int(hotness_min)
+                hotness_min = max(0, min(5, int(hotness_min)))
 
             if not theme and not source_name and not hotness_min:
                 continue
@@ -1569,6 +1804,7 @@ def create_app(test_config=None):
                 active=True,
             ))
 
+        user.last_notification_check = utcnow()
         db.session.commit()
         return jsonify({"message": "Правила сохранены", "items": [item.to_dict() for item in
                                                                   NotificationSetting.query.filter_by(
@@ -1600,8 +1836,7 @@ def create_app(test_config=None):
     def clear_notifications():
         user = get_current_user()
         NotificationItem.query.filter_by(user_id=user.id).delete()
-        state = ensure_state()
-        state.last_signal_check = utcnow()
+        user.last_notification_check = utcnow()
         db.session.commit()
         return jsonify({"message": "Уведомления очищены"})
 
@@ -1609,7 +1844,7 @@ def create_app(test_config=None):
     @jwt_required()
     def rebuild_notifications():
         user = get_current_user()
-        rebuild_notifications_for_all_users()
+        rebuild_notifications_for_user(user)
         items = NotificationItem.query.filter_by(user_id=user.id).order_by(NotificationItem.id.desc()).all()
         return jsonify({"message": "Уведомления обновлены", "items": [item.to_dict() for item in items]})
 

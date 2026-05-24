@@ -39,6 +39,7 @@ GET  /signals              # карточки сигналов для backend/de
 GET  /update/status        # статус полного update
 GET  /api/signals          # карточки для frontend
 GET  /api/market           # MOEX-таблица для frontend
+GET  /api/digests          # недельные дайджесты для frontend
 POST /api/update           # запуск полного update из frontend
 POST /api/admin/update     # совместимый endpoint кнопки обновления
 ```
@@ -50,14 +51,19 @@ Frontend также использует совместимые endpoints для
 Полный цикл:
 
 1. `parser` собирает новые публикации в `raw_news`.
-2. `model` берёт все `raw_news.status = 'new'` от старых к новым, ставит строку в `processing`, вызывает OpenRouter и пишет карточку в `signals`.
-3. При успехе `raw_news.status = 'processed'`; при ошибке `error`, чтобы строку можно было модерировать.
-4. `duplicates` проверяет релевантные сигналы по всей базе, добивает отсутствующие embeddings, применяет PCA-чистку и склеивает дубли.
-5. В первой карточке дубля `signals.sources` становится списком `raw_news.id`; вторичные карточки получают `draft = "DUBLICATE OF <raw_news.id>"` и скрываются из выдачи.
+2. `llm` берёт все `raw_news.status = 'new'` от старых к новым, нормализует текст и пишет в `signals`: `headline`, `summary`, `why_now`, `category`.
+3. `embeddings` считает embedding по `headline + summary` и сохраняет его в `signals.embedding_json`.
+4. `fintech_model` ставит `is_fintech`. Если `is_fintech = 0`, строка дальше не участвует в scoring/dedup и не попадает в витрину.
+5. `feature_models` считают `scale_score`, `urgency_score`, `rigidity_score`.
+6. `duplicates` склеивает fintech-дубли по embeddings, обновляет `sources`, `is_duplicate`, `duplicate_of`, `duplicate_group_id`.
+7. `hotness` считается линейной моделью по `scale_score`, `urgency_score`, `rigidity_score`, числу дублей и авторитетности источников.
+8. `weekly_digest` каждый понедельник в 00:00 MSK после update берёт топ-15 fintech-сигналов прошлой недели без дублей и пишет недельную сводку в `weekly_digests`.
+9. При успехе `raw_news.status = 'processed'`; при ошибке `error`, чтобы строку можно было модерировать.
 
 Особые правила дедупликации:
 
-- `hotness=1`, сухие отчёты и таблицы не сравниваются.
+- Дедупликация работает только по `is_fintech = 1`.
+- Сухие отчёты и таблицы не сравниваются.
 - Дубли ищутся по всей базе, но склеиваются только пары публикаций с разницей дат до 3 дней.
 - Для `Курсы валют` главным дублем выбирается самая свежая карточка, чтобы показывать актуальный курс.
 
@@ -68,6 +74,8 @@ Frontend также использует совместимые endpoints для
 ```
 
 Одновременно может работать только один update. Ручной запуск доступен через 1 час после предыдущего старта любого update. Автозапуск по расписанию пропускается только если update уже идёт. Ограничения на длительность нет; час используется только для проверки устаревшего lock-файла.
+
+Недельный дайджест создаётся в автоматический запуск понедельника 00:00 MSK. Если `weekly_digests` пустая, первый запуск работает в backfill-режиме и создаёт отчёты за все завершённые недели, где есть подходящие fintech-сигналы. После этого создаётся только последняя завершённая неделя. Если за неделю нет подходящих сигналов, stage пропускает её без записи.
 
 ## Database
 
@@ -91,6 +99,7 @@ server: /opt/myapp/data/app.db
 | `is_active` | Активен ли источник |
 | `parse_frequency_minutes` | Частота проверки |
 | `parser_config` | JSON с коннектором и настройками парсинга |
+| `authority_score`, `authority_tier` | Авторитетность источника для выбора главной карточки дубля и итогового hotness |
 | `last_parsed_at` | Последняя проверка |
 | `created_at`, `updated_at` | Служебные даты |
 
@@ -120,12 +129,18 @@ server: /opt/myapp/data/app.db
 | --- | --- |
 | `id` | ID сигнала |
 | `headline` | Короткий заголовок |
-| `hotness` | Важность 1-5 |
-| `why_now` | Банковский смысл события сейчас |
+| `summary` | Нормализованная краткая выжимка новости |
+| `embedding_json` | Embedding и метаданные embedding-модели |
+| `processing_status` | Этап пайплайна: `llm_done`, `embedding_done`, `models_done`, `dedup_done`, `duplicate`, `error` |
+| `is_fintech` | Флаг fintech/no модели; `0` дальше не участвует в scoring/dedup |
+| `scale_score`, `urgency_score`, `rigidity_score` | Компоненты hotness-модели |
+| `hotness` | Итоговая оценка линейной модели 0-5; `-1`, если оценка ещё не рассчитана |
+| `why_now` | Актуальность события для банка |
 | `category` | Одна из фиксированных категорий |
 | `sources` | ID исходной публикации из `raw_news.id`; после дедупликации может быть списком через запятую |
-| `summary` | Краткая выжимка; пусто для `hotness=1` |
-| `draft` | Пусто по умолчанию; embedding JSON или `DUBLICATE OF <raw_news.id>` после дедупликации |
+| `is_duplicate` | Флаг вторичного дубля |
+| `duplicate_of`, `duplicate_group_id` | Связь с главным сигналом дубля |
+| `draft` | Пустое текстовое поле для ручного/служебного комментария |
 
 Категории:
 
@@ -157,6 +172,22 @@ server: /opt/myapp/data/app.db
 | `average_last`, `average_marketprice` | Средние цены |
 | `top_*` | Лидеры по обороту, объёму и сделкам |
 | `moex_systime`, `raw_data`, `fetched_at` | Служебные данные |
+
+### `weekly_digests`
+
+Недельные отчёты для страницы «Дайджесты».
+
+| Поле | Описание |
+| --- | --- |
+| `id` | ID дайджеста |
+| `week_start`, `week_end` | Неделя отчёта |
+| `title` | Короткий заголовок отчёта |
+| `summary` | Главный вывод недели |
+| `report` | Структурированный текст дайджеста |
+| `moex_summary` | Не используется в текущей версии дайджеста |
+| `news_ids` | JSON-массив ID сигналов, попавших в топ-15 |
+| `model`, `prompt_version` | Модель и версия промта |
+| `created_at`, `updated_at` | Служебные даты |
 
 ### Runtime Files
 

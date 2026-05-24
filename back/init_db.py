@@ -64,7 +64,7 @@ INITIAL_SOURCES = [
         "name": "Росстат: национальные счета",
         "url": "https://rosstat.gov.ru/statistics/accounts",
         "source_type": "site",
-        "is_active": 1,
+        "is_active": 0,
         "parse_frequency_minutes": 60,
         "parser_config": {
             "connector": "rosstat",
@@ -706,6 +706,8 @@ CREATE TABLE IF NOT EXISTS sources (
     source_type TEXT NOT NULL DEFAULT 'site',
     is_active INTEGER NOT NULL DEFAULT 1,
     parse_frequency_minutes INTEGER NOT NULL DEFAULT 60,
+    authority_score REAL NOT NULL DEFAULT 0.5,
+    authority_tier TEXT NOT NULL DEFAULT 'telegram_noise',
     parser_config TEXT,
     last_parsed_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -825,19 +827,64 @@ def build_signals_schema_sql() -> str:
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     headline TEXT NOT NULL,
-    hotness INTEGER NOT NULL CHECK(hotness BETWEEN 1 AND 5),
-    why_now TEXT,
+    summary TEXT,
+    embedding_json TEXT,
+    processing_status TEXT NOT NULL DEFAULT 'llm_done' CHECK(processing_status IN (
+        'llm_done',
+        'embedding_done',
+        'models_done',
+        'dedup_done',
+        'duplicate',
+        'error'
+    )),
+    duplicate_of INTEGER,
+    duplicate_group_id TEXT,
+    is_fintech INTEGER NOT NULL DEFAULT 0 CHECK(is_fintech IN (0, 1)),
+    is_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(is_duplicate IN (0, 1)),
+    scale_score REAL,
+    urgency_score REAL,
+    rigidity_score REAL,
+    hotness REAL NOT NULL DEFAULT -1 CHECK(hotness BETWEEN -1 AND 5),
+    why_now TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL CHECK(category IN (
         {category_values}
-    )),
+    )) DEFAULT 'Статистика и данные',
     sources TEXT NOT NULL DEFAULT '[]',
-    summary TEXT,
-    draft TEXT
+    draft TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (duplicate_of) REFERENCES signals(id) ON DELETE SET NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_signals_processing_status ON signals(processing_status);
+CREATE INDEX IF NOT EXISTS idx_signals_duplicate_flags ON signals(is_duplicate, duplicate_of);
+CREATE INDEX IF NOT EXISTS idx_signals_fintech_hotness ON signals(is_fintech, hotness);
+CREATE INDEX IF NOT EXISTS idx_signals_sources ON signals(sources);
 """
 
 
 SIGNALS_SCHEMA_SQL = build_signals_schema_sql()
+
+
+WEEKLY_DIGEST_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS weekly_digests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    week_start TEXT NOT NULL,
+    week_end TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    report TEXT NOT NULL DEFAULT '',
+    moex_summary TEXT NOT NULL DEFAULT '',
+    news_ids TEXT NOT NULL DEFAULT '[]',
+    model TEXT NOT NULL DEFAULT '',
+    prompt_version TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(week_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_weekly_digests_week_start ON weekly_digests(week_start);
+"""
 
 
 def get_db_path(db_path: str | Path | None = None) -> Path:
@@ -862,11 +909,14 @@ def init_db(db_path: str | Path | None = None, seed_initial_source: bool = True)
     with connect_db(db_path) as connection:
         connection.executescript(SCHEMA_SQL)
         ensure_column(connection, "sources", "parser_config", "TEXT")
+        ensure_column(connection, "sources", "authority_score", "REAL NOT NULL DEFAULT 0.5")
+        ensure_column(connection, "sources", "authority_tier", "TEXT NOT NULL DEFAULT 'telegram_noise'")
         ensure_moex_daily_columns(connection)
         ensure_moex_fetch_status(connection)
         ensure_signals_schema(connection)
+        ensure_weekly_digest_schema(connection)
+        refresh_source_authorities(connection)
         remove_retired_sources(connection)
-        cleanup_bad_raw_news(connection)
         cleanup_orphan_signals(connection)
         cleanup_duplicate_signal_sources(connection)
         if seed_initial_source:
@@ -922,12 +972,23 @@ def ensure_signals_schema(connection: sqlite3.Connection) -> None:
     desired_columns = [
         "id",
         "headline",
+        "summary",
+        "embedding_json",
+        "processing_status",
+        "duplicate_of",
+        "duplicate_group_id",
+        "is_fintech",
+        "is_duplicate",
+        "scale_score",
+        "urgency_score",
+        "rigidity_score",
         "hotness",
         "why_now",
         "category",
         "sources",
-        "summary",
         "draft",
+        "created_at",
+        "updated_at",
     ]
     columns = [
         row["name"]
@@ -940,11 +1001,16 @@ def ensure_signals_schema(connection: sqlite3.Connection) -> None:
     """).fetchone()
     schema_sql = schema_row["sql"] if schema_row else ""
     if not columns:
-        connection.execute(SIGNALS_SCHEMA_SQL)
+        connection.executescript(SIGNALS_SCHEMA_SQL)
         return
     has_expected_constraints = (
-        "CHECK(hotness BETWEEN 1 AND 5)" in schema_sql
-        and "sources TEXT NOT NULL DEFAULT '[]'" in schema_sql
+        "embedding_json TEXT" in schema_sql
+        and "processing_status TEXT NOT NULL DEFAULT 'llm_done'" in schema_sql
+        and "duplicate_of INTEGER" in schema_sql
+        and "is_fintech INTEGER NOT NULL DEFAULT 0" in schema_sql
+        and "scale_score REAL" in schema_sql
+        and "hotness REAL NOT NULL DEFAULT -1" in schema_sql
+        and "CHECK(hotness BETWEEN -1 AND 5)" in schema_sql
         and schema_has_current_signal_categories(schema_sql)
     )
     if columns == desired_columns and has_expected_constraints:
@@ -952,13 +1018,145 @@ def ensure_signals_schema(connection: sqlite3.Connection) -> None:
 
     backup_name = f"signals_legacy_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     connection.execute(f"ALTER TABLE signals RENAME TO {backup_name}")
-    connection.execute(SIGNALS_SCHEMA_SQL)
-    if all(column in columns for column in desired_columns):
-        migrate_legacy_signals(connection, backup_name)
+    connection.executescript(SIGNALS_SCHEMA_SQL)
+    migrate_existing_signals(connection, backup_name)
+    # Старую signals-таблицу сознательно оставляем как backup.
+    # Новая архитектура пересобирает signals из raw_news через LLM/model stages.
+
+
+def ensure_weekly_digest_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(WEEKLY_DIGEST_SCHEMA_SQL)
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(weekly_digests)")
+    }
+    new_columns = {
+        "week_start": "TEXT",
+        "week_end": "TEXT",
+        "title": "TEXT NOT NULL DEFAULT ''",
+        "summary": "TEXT NOT NULL DEFAULT ''",
+        "report": "TEXT NOT NULL DEFAULT ''",
+        "moex_summary": "TEXT NOT NULL DEFAULT ''",
+        "news_ids": "TEXT NOT NULL DEFAULT '[]'",
+        "model": "TEXT NOT NULL DEFAULT ''",
+        "prompt_version": "TEXT NOT NULL DEFAULT ''",
+        "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_type in new_columns.items():
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE weekly_digests ADD COLUMN {column_name} {column_type}")
+
+    connection.execute("""
+        UPDATE weekly_digests
+        SET week_start = COALESCE(NULLIF(week_start, ''), date(created_at, '-6 day')),
+            week_end = COALESCE(NULLIF(week_end, ''), date(created_at)),
+            news_ids = COALESCE(NULLIF(news_ids, ''), '[]'),
+            title = COALESCE(title, ''),
+            summary = COALESCE(summary, ''),
+            report = COALESCE(report, ''),
+            moex_summary = COALESCE(moex_summary, ''),
+            model = COALESCE(model, ''),
+            prompt_version = COALESCE(prompt_version, ''),
+            updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
+    """)
+    connection.execute("""
+        DELETE FROM weekly_digests
+        WHERE id NOT IN (
+            SELECT MIN(id)
+            FROM weekly_digests
+            WHERE week_start IS NOT NULL AND TRIM(week_start) != ''
+            GROUP BY week_start
+        )
+    """)
+    connection.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_weekly_digests_week_start
+        ON weekly_digests(week_start)
+    """)
 
 
 def schema_has_current_signal_categories(schema_sql: str) -> bool:
     return all(f"'{category}'" in schema_sql for category in SIGNAL_CATEGORIES)
+
+
+def migrate_existing_signals(connection: sqlite3.Connection, backup_name: str) -> None:
+    backup_columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({backup_name})")
+    }
+    target_columns = [
+        "id",
+        "headline",
+        "summary",
+        "embedding_json",
+        "processing_status",
+        "duplicate_of",
+        "duplicate_group_id",
+        "is_fintech",
+        "is_duplicate",
+        "scale_score",
+        "urgency_score",
+        "rigidity_score",
+        "hotness",
+        "why_now",
+        "category",
+        "sources",
+        "draft",
+        "created_at",
+        "updated_at",
+    ]
+    select_columns = [column for column in target_columns if column in backup_columns]
+    if not select_columns:
+        return
+
+    rows = connection.execute(
+        f"SELECT {', '.join(select_columns)} FROM {backup_name} ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        data = {column: row[column] for column in select_columns}
+        category = data.get("category")
+        if category not in SIGNAL_CATEGORIES:
+            category = SIGNAL_CATEGORIES[-1]
+        values = {
+            "id": data.get("id"),
+            "headline": data.get("headline") or "Без заголовка",
+            "summary": data.get("summary") or "",
+            "embedding_json": data.get("embedding_json"),
+            "processing_status": normalize_signal_processing_status(data.get("processing_status")),
+            "duplicate_of": data.get("duplicate_of"),
+            "duplicate_group_id": data.get("duplicate_group_id"),
+            "is_fintech": int(data.get("is_fintech") or 0),
+            "is_duplicate": int(data.get("is_duplicate") or 0),
+            "scale_score": data.get("scale_score"),
+            "urgency_score": data.get("urgency_score"),
+            "rigidity_score": data.get("rigidity_score"),
+            "hotness": normalize_migrated_hotness(data.get("hotness")),
+            "why_now": data.get("why_now") or "",
+            "category": category,
+            "sources": data.get("sources") or "[]",
+            "draft": data.get("draft") or "",
+            "created_at": data.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+            "updated_at": data.get("updated_at") or datetime.now().isoformat(timespec="seconds"),
+        }
+        placeholders = ", ".join("?" for _ in target_columns)
+        connection.execute(f"""
+            INSERT INTO signals ({", ".join(target_columns)})
+            VALUES ({placeholders})
+        """, tuple(values[column] for column in target_columns))
+
+
+def normalize_migrated_hotness(value) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return -1.0
+    return max(-1.0, min(5.0, number))
+
+
+def normalize_signal_processing_status(value) -> str:
+    allowed = {"llm_done", "embedding_done", "models_done", "dedup_done", "duplicate", "error"}
+    text = str(value or "").strip()
+    return text if text in allowed else "llm_done"
 
 
 def migrate_legacy_signals(connection: sqlite3.Connection, backup_name: str) -> None:
@@ -1073,7 +1271,7 @@ def cleanup_orphan_signals(connection: sqlite3.Connection) -> None:
 
 
 def cleanup_duplicate_signal_sources(connection: sqlite3.Connection) -> None:
-    rows = connection.execute("SELECT id, sources, draft FROM signals").fetchall()
+    rows = connection.execute("SELECT id, sources, is_duplicate FROM signals").fetchall()
     signals_by_single_source = {}
     for row in rows:
         source_ids = parse_signal_source_ids(row["sources"])
@@ -1087,18 +1285,13 @@ def cleanup_duplicate_signal_sources(connection: sqlite3.Connection) -> None:
         keeper = sorted(
             duplicate_rows,
             key=lambda row: (
-                is_duplicate_signal_draft(row["draft"]),
+                bool(row["is_duplicate"]),
                 row["id"],
             ),
         )[0]
         for row in duplicate_rows:
             if row["id"] != keeper["id"]:
                 connection.execute("DELETE FROM signals WHERE id = ?", (row["id"],))
-
-
-def is_duplicate_signal_draft(value) -> bool:
-    return str(value or "").startswith("DUBLICATE OF ")
-
 
 def parse_signal_source_ids(value) -> list[int]:
     if value is None:
@@ -1151,6 +1344,7 @@ def seed_source(connection: sqlite3.Connection, source: dict) -> None:
     parser_config.setdefault("strict_dates", True)
     parser_config.setdefault("max_future_hours", MAX_FUTURE_HOURS)
     parser_config.setdefault("min_text_length", MIN_TEXT_LENGTH)
+    authority_tier, authority_score = get_source_authority(source)
 
     connection.execute("""
         INSERT INTO sources (
@@ -1160,15 +1354,19 @@ def seed_source(connection: sqlite3.Connection, source: dict) -> None:
             source_type,
             is_active,
             parse_frequency_minutes,
+            authority_score,
+            authority_tier,
             parser_config
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             url = excluded.url,
             source_type = excluded.source_type,
             is_active = excluded.is_active,
             parse_frequency_minutes = excluded.parse_frequency_minutes,
+            authority_score = excluded.authority_score,
+            authority_tier = excluded.authority_tier,
             parser_config = excluded.parser_config
     """, (
         source["id"],
@@ -1177,8 +1375,59 @@ def seed_source(connection: sqlite3.Connection, source: dict) -> None:
         source["source_type"],
         source["is_active"],
         source["parse_frequency_minutes"],
+        authority_score,
+        authority_tier,
         json.dumps(parser_config, ensure_ascii=False),
     ))
+
+
+def refresh_source_authorities(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("""
+        SELECT id, name, url, source_type, is_active, parse_frequency_minutes, parser_config
+        FROM sources
+    """).fetchall()
+    for row in rows:
+        source = dict(row)
+        tier, score = get_source_authority(source)
+        connection.execute("""
+            UPDATE sources
+            SET authority_score = ?,
+                authority_tier = ?
+            WHERE id = ?
+        """, (score, tier, row["id"]))
+
+
+def get_source_authority(source: dict) -> tuple[str, float]:
+    source_id = int(source.get("id") or 0)
+    source_type = str(source.get("source_type") or "").lower()
+    url = str(source.get("url") or "").lower()
+    official_source_ids = {
+        2,   # Minfin
+        3,   # Rosstat
+        4,   # MOEX
+        5,   # Alfa-Bank
+        6,   # Sber
+        7,   # T-Bank
+        8,   # VTB
+        24,  # Rosfinmonitoring
+        25,  # FNS
+        26,  # Bank of Russia
+        27,  # Association FinTech
+        35,  # ECB
+    }
+    if source_id in official_source_ids or any(domain in url for domain in (
+        "cbr.ru",
+        "minfin.gov.ru",
+        "rosstat.gov.ru",
+        "moex.com",
+        "nalog.gov.ru",
+        "fedsfm.ru",
+        "ecb.europa.eu",
+    )):
+        return "major_official", 1.0
+    if source_type == "telegram" or "t.me/" in url:
+        return "telegram_fast_noise", 0.5
+    return "registered_media", 0.8
 
 # ==============================
 # MOEX market context helpers

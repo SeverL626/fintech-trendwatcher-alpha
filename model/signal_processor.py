@@ -64,11 +64,26 @@ def process_new_raw_news(db_path=DB_PATH, limit=None):
                 rn.published_at,
                 rn.parsed_at,
                 rn.raw_data,
+                rn.status,
                 s.name AS source_name,
                 s.source_type
             FROM raw_news rn
             JOIN sources s ON s.id = rn.source_id
             WHERE rn.status = 'new'
+               OR (
+                   rn.status = 'processed'
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM signals sig
+                       WHERE sig.sources = CAST(rn.id AS TEXT)
+                          OR sig.sources LIKE CAST(rn.id AS TEXT) || ',%'
+                          OR sig.sources LIKE '%,' || CAST(rn.id AS TEXT) || ',%'
+                          OR sig.sources LIKE '%,' || CAST(rn.id AS TEXT)
+                          OR sig.sources = '[' || CAST(rn.id AS TEXT) || ']'
+                          OR sig.sources LIKE '[' || CAST(rn.id AS TEXT) || ',%'
+                          OR sig.sources LIKE '%,' || CAST(rn.id AS TEXT) || ']'
+                   )
+               )
             ORDER BY datetime(COALESCE(rn.published_at, rn.parsed_at)) ASC, rn.id ASC
         """
         params = ()
@@ -86,7 +101,7 @@ def process_new_raw_news(db_path=DB_PATH, limit=None):
     openrouter_usage = summarize_openrouter_usage(results)
 
     return {
-        "mode": "single_model",
+        "mode": "llm_normalizer",
         "requested_limit": limit or "all",
         "max_requests_per_run": "all",
         "model": OPENROUTER_MODEL,
@@ -112,16 +127,16 @@ def process_raw_news_row(db, row, categories):
     mark_raw_news_status(db, raw_news_id, "processing")
 
     try:
-        card, usage = build_signal_card_with_openrouter(row, categories, OPENROUTER_MODEL)
-        normalized_card = normalize_signal_card(card, row, categories, OPENROUTER_MODEL)
-        signal_id = insert_signal(db, row, normalized_card)
+        normalized_news, usage = build_normalized_news_with_openrouter(row, OPENROUTER_MODEL, categories)
+        normalized_signal = normalize_llm_signal(normalized_news, row, OPENROUTER_MODEL, categories)
+        signal_id = insert_signal(db, row, normalized_signal)
         usage_cost = get_usage_cost(usage)
         card_summary = {
-            "model": normalized_card["model"],
+            "model": normalized_signal["model"],
             "signal_id": signal_id,
-            "headline": normalized_card["headline"],
-            "category": normalized_card["category"],
-            "hotness": normalized_card["hotness"],
+            "headline": normalized_signal["headline"],
+            "category": normalized_signal["category"],
+            "processing_status": normalized_signal["processing_status"],
             "usage": usage,
             "cost": usage_cost,
         }
@@ -170,7 +185,7 @@ def signal_exists_for_raw_news(db, raw_news_id):
     return False
 
 
-def build_signal_card_with_openrouter(row, categories, model):
+def build_normalized_news_with_openrouter(row, model, categories):
     api_key = get_openrouter_api_key()
     payload = {
         "model": model,
@@ -181,7 +196,7 @@ def build_signal_card_with_openrouter(row, categories, model):
             },
         ],
         "temperature": 0.2,
-        "max_tokens": 700,
+        "max_tokens": 550,
         "response_format": {"type": "json_object"},
     }
     response = post_openrouter_with_retries(api_key, payload)
@@ -323,49 +338,45 @@ def build_signal_prompt(row, categories):
     category_guide = build_category_guide(categories)
 
     return f"""
-Ты — аналитик трендвотчера для Альфа-Банка. Оцени одну публикацию и верни только один валидный JSON-объект: без markdown, пояснений, текста до/после JSON и trailing comma. Факты не выдумывай; если текст не на русском, передай смысл на русском.
+Ты — аналитик-нормализатор трендвотчера для Альфа-Банка.
 
-Фокус: российский банковский и финтех-рынок. Для Альфа-Банка важнее РФ, ЦБ РФ, НСПК, СБП, крупные российские банки, платежная инфраструктура, клиентские сценарии, риск, комплаенс, антифрод, идентификация и новые банковские/финтех-системы. Глобальные события важны только при понятном канале влияния на российский банк.
+Твоя задача: очистить одну публикацию от мусора, кратко описать событие и написать актуальность для банка.
+НЕ оценивай hotness и НЕ решай fintech/no.
+НЕ придумывай факты. Если фактов мало, пиши осторожно.
+Если текст не на русском, передай смысл на русском.
 
-Очисти навигацию, рекламу, меню, boilerplate и повторы заголовка. Если содержательной новости нет — hotness=1.
+Убери навигацию, рекламу, меню, boilerplate, cookie-баннеры, повторы заголовка и технический мусор.
+Сохрани только проверяемые факты из исходного текста: кто, что сделал/сообщил, дата/период, цифры, продукт/рынок/регуляторика, если они есть.
 
-Шкала hotness:
-1 — шум: нерелевантно финансам/банкам/финтеху; общий PR; кадровые новости; конференции; абстрактные советы; навигация/boilerplate; риски без новой схемы, цифр, масштаба или банковского вывода. Для 1: why_now="--", summary="", draft="".
-2 — фон: обычные отчеты, таблицы, статистика, финансовая отчетность без неожиданного вывода, локальные новости, зарубежный финтех без прямого влияния на РФ, глобальный фон без прямого действия для банка.
-3 — средние новости: есть конкретное событие и связь с продуктами, платежами, клиентским опытом, рисками, конкурентами, регулированием или рынком; исследования с косвенным влиянием; масштаб/срочность умеренные.
-4 — важные, но не срочные: российский регулятор, крупный банк, финтех, НСПК/СБП/ЦБ РФ или инфраструктурный игрок меняет правила, продукт, комиссии, UX, риск, комплаенс или конкурентную позицию; исследования с прямым влиянием, но без срочной реакции. Глобальное событие ставь 4 только при явном канале влияния на российские банки: санкции, платежи, валютные ограничения, трансграничные расчеты, ликвидность, ставки/курсы с прямым рыночным эффектом.
-5 — важные и срочные: обязательное требование ЦБ РФ или закона с дедлайном; крупное изменение СБП/НСПК/цифрового рубля/open banking/биометрии/идентификации; массовая атака на клиентов банков; продолжающийся массовый сбой критической банковской/платежной инфраструктуры; резкое изменение правил; крупное действие системного российского конкурента; санкции/ограничения, прямо затрагивающие российские банки; очень важные исследования с прямым практическим выводом. Нужна реакция за 24-72 часа.
+why_now — это не пересказ новости, а банковский смысл сейчас: риск, продуктовый эффект, изменение правил, конкурентное давление, влияние на платежи, клиентов, антифрод, комплаенс или рынки.
+Пиши why_now коротко и конкретно, одним предложением.
+Не начинай why_now с "Вышел", "Сообщили", "Объявили", "Опубликован", "Компания сообщила", "ЦБ сообщил".
+Если публикация не имеет понятной связи с банками, финансами, финтехом, платежами, рынками, регулированием, клиентским опытом или Альфа-Банком, поставь why_now="--".
+Если это сухая таблица, набор данных, XLS/XLSX/CSV или отчет без прямого банковского вывода, поставь why_now="Фоновая статистика без прямого действия для банка.".
 
-Правила оценки:
-- Если сомневаешься между двумя оценками, выбери меньшую.
-- Не ставь 3+ без конкретного события, масштаба, источника влияния или понятного вывода для банка.
-- Отчетность сама по себе обычно 2; выше только при неожиданном результате или прямом конкурентном выводе.
-- Сухой файл Росстата, XLS/XLSX/CSV-таблица или набор данных без новости, решения, риска или продуктового вывода: hotness=2, why_now="Фоновая статистика без прямого действия для банка.", summary="Вышел отчёт." или "Вышла таблица.".
-- Для обычных новостей, пресс-релизов, заявлений, запусков, регуляторики, аналитики и СМИ не используй why_now="Отчёт"; пиши банковский смысл события.
-- Глобальная макроэкономика без прямого канала влияния на российские банки обычно 1-2. Глобальные ставки, ФРС/ЕЦБ и зарубежные регуляторы обычно 2-3; ставь 4 только при явном влиянии на РФ, банки, платежи, санкции, ликвидность или рынки.
-- Иностранные финтех-запуски, платежные продукты, embedded finance, BNPL, процессинг, identity/fraud-tech обычно 2, а не 1, если есть конкретный продукт, сделка, запуск или изменение клиентского сценария. Если связи с банками/финтехом нет или это общий PR без банковского вывода — 1.
-- Регуляторное обсуждение без сроков обычно 3; проект/обсуждение ЦБ РФ без дедлайна — 3; решение ЦБ РФ — 4; обязательное изменение ЦБ РФ/закона с дедлайном — 5.
-- Новые российские финтех- и банковские системы: 5 только при обязательности, дедлайне, массовом внедрении или влиянии на инфраструктуру, иначе 3-4.
-- Сбой критической банковской/платежной инфраструктуры: 4 только если он массовый, продолжается, влияет на клиентов/платежи прямо сейчас или требует реакции банка в 24-72 часа; если локализован или описан постфактум — 3 или 4.
-- Кибер/мошенничество: общие советы 1; новая схема с цифрами/масштабом 3; массовая атака на клиентов банков 4-5.
+Ориентиры для why_now:
+- Регуляторика: укажи действие, риск, срок или изменение процесса.
+- Конкуренты: укажи влияние на продукт, клиента, комиссию, UX или долю рынка.
+- Платежи и финтех: укажи сценарий, лимит, инфраструктуру, комиссию или клиентский путь.
+- Антифрод и кибер: укажи риск для клиентов, операций или банка.
+- Макро/рынки: укажи канал влияния на ставки, ликвидность, инвестиции, валюту или банковский спрос.
+- Зарубежные новости: пиши канал влияния на РФ/банк;
 
-Категории: выбери ровно одну из списка, новые не придумывай; если подходят несколько, выбери главную по банковскому сигналу.
+Выбери ровно одну категорию из списка. Новые категории не придумывай.
+Категория — это тематическая полка новости, а не оценка важности.
+
+Категории:
 {category_list}
 
 Ориентир по категориям:
 {category_guide}
 
-why_now: не пересказ, а банковский смысл сейчас: риск, продуктовый эффект, изменение правил, конкурентное давление, влияние на платежи, клиентов, антифрод или комплаенс. Не начинай с "Вышел", "Сообщили", "Объявили", "Опубликован", "Компания сообщила", "ЦБ сообщил". Для регуляторики укажи действие/риск/срок/изменение процесса; для конкурентов — влияние на конкуренцию, продукт или клиентский сценарий; для платежей/финтеха — сценарий, лимит, UX, комиссию или инфраструктуру; для мошенничества/кибера — риск для клиентов или банка; для зарубежных новостей — канал влияния на РФ/банк, иначе hotness 1-2.
-Хорошие примеры why_now: "Банкам может потребоваться обновить комплаенс-процессы под новые требования ЦБ."; "Изменение лимитов может повлиять на платежные сценарии малого бизнеса."; "Конкурент усиливает клиентский сценарий и может забрать часть транзакций."; "Возможны новые ограничения для расчетов и операций российских банков."; "Фоновая статистика без прямого действия для банка."
-
 Формат JSON:
 {{
   "headline": "нейтральный заголовок 5-10 слов",
-  "hotness": 1,
-  "why_now": "банковский смысл события сейчас, не пересказ новости",
-  "category": "одна из допустимых категорий",
-  "summary": "для hotness=1 пусто; иначе 1-3 коротких предложения с фактами",
-  "draft": "пусто, если нет ошибки, сомнения или ограничения качества"
+  "summary": "1-3 коротких предложения, только факты из публикации",
+  "why_now": "короткая актуальность для банка",
+  "category": "одна из допустимых категорий"
 }}
 
 Входные данные:
@@ -423,36 +434,33 @@ def parse_json_response(value):
     return parsed
 
 
-def normalize_signal_card(card, row, categories, model):
+def normalize_llm_signal(card, row, model, categories):
     headline = clean_text(card.get("headline")) or clean_text(row["title"]) or "Без заголовка"
     summary = clean_text(card.get("summary")) or headline
-    draft = clean_text(card.get("draft"))
-    why_now = clean_text(card.get("why_now")) or "Недостаточно данных для оценки срочности."
     category = clean_text(card.get("category"))
     if category not in categories:
-        category = categories[0]
-    hotness = normalize_hotness(card.get("hotness"))
-    if why_now == "--":
-        hotness = 1
-    if is_plain_report_row(row):
-        hotness = max(hotness, 2)
-        if hotness <= 2:
-            hotness = 2
-            why_now = "Фоновая статистика без прямого действия для банка."
-            summary = get_plain_report_summary(row)
-            draft = ""
-    if hotness == 1:
-        summary = ""
+        category = get_default_category(categories)
 
     return {
         "headline": headline[:300],
-        "hotness": hotness,
-        "why_now": why_now,
-        "category": category,
         "summary": summary,
-        "draft": draft,
+        "why_now": normalize_why_now(card.get("why_now")),
+        "category": category,
+        "processing_status": "llm_done",
         "model": model,
     }
+
+
+def normalize_why_now(value):
+    text = clean_text(value)
+    return text or "--"
+
+
+def get_default_category(categories):
+    for category in categories:
+        if category == "Статистика и данные":
+            return category
+    return categories[0] if categories else DEFAULT_SIGNAL_CATEGORIES[-1]
 
 
 def is_plain_report_row(row):
@@ -495,22 +503,22 @@ def insert_signal(db, row, card):
     cursor = db.execute("""
         INSERT INTO signals (
             headline,
-            hotness,
+            summary,
             why_now,
             category,
+            processing_status,
             sources,
-            summary,
             draft
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         card["headline"],
-        card["hotness"],
+        card["summary"],
         card["why_now"],
         card["category"],
-        row["id"],
-        card["summary"],
-        card["draft"],
+        card["processing_status"],
+        str(row["id"]),
+        "",
     ))
     db.commit()
     return cursor.lastrowid
@@ -529,14 +537,25 @@ def mark_raw_news_status(db, raw_news_id, status, error_message=None):
 def list_signals(db_path=DB_PATH, limit=20):
     limit = normalize_limit(limit, default=20, maximum=100)
     with connect_db(db_path) as db:
-        rows = db.execute("""
+        not_duplicate_where = signal_not_duplicate_where(db)
+        rows = db.execute(f"""
             SELECT id, headline, hotness, why_now, category, sources, summary, draft
             FROM signals
-            WHERE draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %'
+            WHERE {not_duplicate_where}
             ORDER BY id DESC
             LIMIT ?
         """, (limit,)).fetchall()
         return [row_to_signal_dict(row) for row in rows]
+
+
+def signal_not_duplicate_where(db):
+    try:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(signals)").fetchall()}
+    except Exception:
+        columns = set()
+    if "is_duplicate" in columns:
+        return "COALESCE(is_duplicate, 0) = 0"
+    return "(draft IS NULL OR draft NOT LIKE 'DUBLICATE OF %')"
 
 
 def row_to_signal_dict(row):
@@ -547,15 +566,7 @@ def row_to_signal_dict(row):
 
 
 def normalize_public_draft(value):
-    if not value:
-        return value
-    try:
-        draft_data = json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return value
-    if not isinstance(draft_data, dict) or "embedding" not in draft_data:
-        return value
-    return draft_data.get("previous_draft") or ""
+    return value or ""
 
 
 def normalize_sources_value(value):

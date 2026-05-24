@@ -152,6 +152,70 @@ function MultiSelect({ values, onChange, options, placeholder }) {
   )
 }
 
+function ScoreRangeFilter({ ranges, onChange }) {
+  const [isOpen, setIsOpen] = React.useState(false)
+  const activeCount = Object.values(ranges).filter((range) =>
+    Number(range.min) > 0 || Number(range.max) < 5
+  ).length
+  const label = activeCount ? `Hotness: фильтров ${activeCount}` : 'Hotness и параметры'
+
+  const updateRange = (key, patch) => {
+    const current = ranges[key]
+    const next = { ...current, ...patch }
+    const min = Math.max(0, Math.min(5, Number(next.min)))
+    const max = Math.max(0, Math.min(5, Number(next.max)))
+    onChange(key, min <= max ? { min, max } : { min: max, max: min })
+  }
+
+  return (
+    <div className="score-filter">
+      <button className="select-trigger" type="button" onClick={() => setIsOpen((current) => !current)}>
+        {label}
+      </button>
+      {isOpen ? (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setIsOpen(false)} />
+          <div className="score-filter-panel">
+            {Object.entries(ranges).map(([key, range]) => (
+              <div className="score-range-row" key={key}>
+                <div className="score-range-head">
+                  <span>{range.label}</span>
+                  <span>{range.min} - {range.max}</span>
+                </div>
+                <div className="score-range-inputs">
+                  <input
+                    type="range"
+                    min="0"
+                    max="5"
+                    step="0.1"
+                    value={range.min}
+                    onChange={(event) => updateRange(key, { min: event.target.value })}
+                  />
+                  <input
+                    type="range"
+                    min="0"
+                    max="5"
+                    step="0.1"
+                    value={range.max}
+                    onChange={(event) => updateRange(key, { max: event.target.value })}
+                  />
+                </div>
+              </div>
+            ))}
+            <button
+              className="button ghost score-reset"
+              type="button"
+              onClick={() => Object.keys(ranges).forEach((key) => onChange(key, { min: 0, max: 5 }))}
+            >
+              Сбросить диапазоны
+            </button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  )
+}
+
 function routeUrl(path) {
   return `${window.location.origin}${window.location.pathname}#${path}`
 }
@@ -226,7 +290,35 @@ function subscriptionStatusLabel(status) {
 }
 
 function hotnessClass(value) {
-  return `hotness-${Number(value) || 0}`
+  const number = Number(value)
+  if (number < 0) return 'hotness-pending'
+  return `hotness-${Math.round(number) || 0}`
+}
+
+function scoreValue(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function combinedSignalScore(item) {
+  const hotness = scoreValue(item?.hotness)
+  if (hotness !== null && hotness >= 0) return hotness
+  const values = [item?.scale_score, item?.urgency_score, item?.rigidity_score]
+    .map(scoreValue)
+    .filter((value) => value !== null)
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : -1
+}
+
+function formatScore(value) {
+  const number = scoreValue(value)
+  if (number === null) return '—'
+  return number.toFixed(2).replace(/\.?0+$/, '')
+}
+
+function formatHotness(value) {
+  const number = scoreValue(value)
+  if (number === null || number < 0) return 'Hotness pending'
+  return `Hotness ${formatScore(number)}`
 }
 
 function categoryClass(category) {
@@ -1103,7 +1195,7 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
   const [pyramidItems, setPyramidItems] = useState(null)
 
   const filteredSignals = useMemo(() =>
-    signals.filter(s => Number(s.hotness) > 1),
+    signals.filter(s => s.is_fintech !== false),
     [signals]
   );
 
@@ -1116,16 +1208,13 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
     let alive = true
     ;(async () => {
       try {
-        const [h5, h4, h3] = await Promise.all([
-          apiFetch('/api/signals?limit=1&hotness=5&sort=time_desc'),
-          apiFetch('/api/signals?limit=2&hotness=4&sort=time_desc'),
-          apiFetch('/api/signals?limit=3&hotness=3&sort=time_desc'),
-        ])
+        const top = await apiFetch('/api/signals?limit=6&sort=hotness&time_range=3d')
+        const items = top.items || []
         if (alive) {
           setPyramidItems({
-            hot5: h5.items || [],
-            hot4: h4.items || [],
-            hot3: h3.items || [],
+            hot5: items.slice(0, 1),
+            hot4: items.slice(1, 3),
+            hot3: items.slice(3, 6),
           })
         }
       } catch {
@@ -1137,9 +1226,16 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
     }
   }, [signals.length])
 
-  const hot5 = pyramidItems?.hot5 || sorted.filter((item) => Number(item.hotness) === 5).slice(0, 1)
-  const hot4 = pyramidItems?.hot4 || sorted.filter((item) => Number(item.hotness) === 4).slice(0, 2)
-  const hot3 = pyramidItems?.hot3 || sorted.filter((item) => Number(item.hotness) === 3).slice(0, 3)
+  const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000
+  const recentSorted = sorted.filter((item) => {
+    const date = parseDisplayDate(item.published_at || item.created_at)
+    return Number.isFinite(date.getTime()) && date.getTime() >= threeDaysAgo
+  })
+  const scoreSorted = [...(recentSorted.length ? recentSorted : sorted)]
+    .sort((a, b) => combinedSignalScore(b) - combinedSignalScore(a))
+  const hot5 = pyramidItems?.hot5 || scoreSorted.slice(0, 1)
+  const hot4 = pyramidItems?.hot4 || scoreSorted.slice(1, 3)
+  const hot3 = pyramidItems?.hot3 || scoreSorted.slice(3, 6)
 
   const counts = {
     observations: overview.observations ?? signals.length,
@@ -1219,15 +1315,131 @@ function AboutPage() {
 }
 
 function DigestsPage() {
+  const [digests, setDigests] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [hasMore, setHasMore] = useState(false)
+
+  const loadDigests = async (reset = false) => {
+    const offset = reset ? 0 : digests.length
+    setLoading(true)
+    setError('')
+    try {
+      const data = await apiFetch(`/api/digests?limit=${PAGE_SIZE}&offset=${offset}`)
+      const items = data.items || []
+      setDigests((prev) => reset ? items : [...prev, ...items])
+      setHasMore(Boolean(data.has_more))
+    } catch (loadError) {
+      setError(loadError.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setError('')
+    ;(async () => {
+      try {
+        const data = await apiFetch(`/api/digests?limit=${PAGE_SIZE}&offset=0`)
+        if (!alive) return
+        setDigests(data.items || [])
+        setHasMore(Boolean(data.has_more))
+      } catch (loadError) {
+        if (alive) setError(loadError.message)
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
   return (
     <div className="stack">
-      <section className="card page-head placeholder-page">
-        <h1>Данная страница еще в разработке</h1>
-        <p>В будущем здесь будет располагаться краткая еженедельная сводка.</p>
-        <img className="placeholder-cat" src="/working-cat.svg" alt="Дайджесты в разработке" />
+      <section className="card page-head">
+        <h1>Дайджесты</h1>
+        <p>Краткая недельная сводка по главным финтех-сигналам без дублей.</p>
       </section>
+
+      {error ? <div className="card center-card">{error}</div> : null}
+
+      {loading && !digests.length ? (
+        <section className="card center-card">Пожалуйста подождите, данные загружаются.</section>
+      ) : null}
+
+      {!loading && !digests.length && !error ? (
+        <section className="card placeholder-page">
+          <h2>Дайджестов пока нет</h2>
+          <p>Первый недельный дайджест появится после автоматического update в понедельник 00:00 MSK.</p>
+          <img className="placeholder-cat" src="/working-cat.svg" alt="Дайджесты готовятся" />
+        </section>
+      ) : null}
+
+      {digests.map((digest) => (
+        <DigestCard key={digest.id} digest={digest} />
+      ))}
+
+      {hasMore ? (
+        <button className="button ghost full" onClick={() => loadDigests(false)} disabled={loading}>
+          {loading ? 'Загружаю...' : 'Загрузить ещё'}
+        </button>
+      ) : null}
     </div>
   )
+}
+
+function DigestCard({ digest }) {
+  const period = [digest.week_start, digest.week_end].filter(Boolean).join(' — ')
+  return (
+    <article className="card digest-card">
+      <div className="digest-card-head">
+        <div>
+          <div className="digest-period">{period || 'Недельный период'}</div>
+          <h2>{digest.title || 'Недельный дайджест Red Cat'}</h2>
+        </div>
+        <span className="mini-pill">{(digest.news_ids || []).length || 0} сигналов</span>
+      </div>
+      {digest.summary ? <p className="digest-summary">{digest.summary}</p> : null}
+      <DigestText text={digest.report || ''} />
+    </article>
+  )
+}
+
+function DigestText({ text }) {
+  const blocks = String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (!blocks.length) return null
+
+  return (
+    <div className="digest-report">
+      {blocks.map((line, index) => {
+        const normalized = cleanDigestLine(line.replace(/^[-*]\s+/, '').replace(/^\d+\.\s+/, ''))
+        if (/^#{1,3}\s+/.test(line)) {
+          return <h3 key={index}>{cleanDigestLine(line.replace(/^#{1,3}\s+/, ''))}</h3>
+        }
+        if (/^\d+\.\s+/.test(line) || /^[-*]\s+/.test(line)) {
+          return <p key={index} className="digest-bullet">{normalized}</p>
+        }
+        if (line.endsWith(':') && line.length < 90) {
+          return <h3 key={index}>{cleanDigestLine(line.replace(/:$/, ''))}</h3>
+        }
+        return <p key={index}>{cleanDigestLine(line)}</p>
+      })}
+    </div>
+  )
+}
+
+function cleanDigestLine(line) {
+  return String(line || '')
+    .replace(/\*\*/g, '')
+    .replace(/__+/g, '')
+    .trim()
 }
 
 function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavorite }) {
@@ -1236,7 +1448,12 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
   const [sortBy, setSortBy] = useState('hotness')
   const [category, setCategory] = useState([])
   const [source, setSource] = useState([])
-  const [hotness, setHotness] = useState([])
+  const [scoreRanges, setScoreRanges] = useState({
+    hotness: { label: 'Итоговый hotness', min: 0, max: 5 },
+    scale: { label: 'Масштаб', min: 0, max: 5 },
+    urgency: { label: 'Срочность', min: 0, max: 5 },
+    rigidity: { label: 'Жёсткость', min: 0, max: 5 },
+  })
   const [timeRange, setTimeRange] = useState('week')
   const [pageSignals, setPageSignals] = useState([])
   const [hasMore, setHasMore] = useState(false)
@@ -1251,7 +1468,14 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     })
     if (category.length) params.set('category', category.join(','))
     if (source.length) params.set('source', source.join(','))
-    params.set('hotness', hotness.length ? hotness.join(',') : '2,3,4,5')
+    if (scoreRanges.hotness.min > 0) params.set('hotness_min', scoreRanges.hotness.min)
+    if (scoreRanges.hotness.max < 5) params.set('hotness_max', scoreRanges.hotness.max)
+    if (scoreRanges.scale.min > 0) params.set('scale_min', scoreRanges.scale.min)
+    if (scoreRanges.scale.max < 5) params.set('scale_max', scoreRanges.scale.max)
+    if (scoreRanges.urgency.min > 0) params.set('urgency_min', scoreRanges.urgency.min)
+    if (scoreRanges.urgency.max < 5) params.set('urgency_max', scoreRanges.urgency.max)
+    if (scoreRanges.rigidity.min > 0) params.set('rigidity_min', scoreRanges.rigidity.min)
+    if (scoreRanges.rigidity.max < 5) params.set('rigidity_max', scoreRanges.rigidity.max)
     if (timeRange !== 'all') params.set('time_range', timeRange)
     if (query.trim()) params.set('q', query.trim())
     return `/api/signals?${params.toString()}`
@@ -1298,7 +1522,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     return () => {
       alive = false
     }
-  }, [sortBy, category, source, hotness, timeRange, query])
+  }, [sortBy, category, source, scoreRanges, timeRange, query])
 
   const submitSearch = (event) => {
     event.preventDefault()
@@ -1314,6 +1538,13 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
     const values = overview.source_options || signals.filter((item) => Number(item.hotness) !== 1).map((item) => item.source_name).filter(Boolean)
     return [...new Set(values)].map((value) => ({ value, label: value }))
   }, [signals, overview.source_options])
+
+  const updateScoreRange = (key, range) => {
+    setScoreRanges((current) => ({
+      ...current,
+      [key]: { ...current[key], ...range },
+    }))
+  }
 
   return (
     <div className="stack">
@@ -1334,7 +1565,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
         </form>
 
         {/* 2. Твой новый красивый тулбар */}
-        <div className="cards-toolbar">
+        <div className="cards-toolbar cards-toolbar-main">
           <CustomSelect
             value={sortBy}
             onChange={setSortBy}
@@ -1361,18 +1592,7 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
             placeholder="Все источники"
           />
 
-          <MultiSelect
-            value={hotness}
-            values={hotness}
-            onChange={setHotness}
-            options={[
-              { value: '5', label: 'Hotness: 5' },
-              { value: '4', label: 'Hotness: 4' },
-              { value: '3', label: 'Hotness: 3' },
-              { value: '2', label: 'Hotness: 2' }
-            ]}
-            placeholder="Любой hotness"
-          />
+          <ScoreRangeFilter ranges={scoreRanges} onChange={updateScoreRange} />
 
           <CustomSelect
             value={timeRange}
@@ -1380,12 +1600,11 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
             options={[
               { value: 'all', label: 'Любое время' },
               { value: 'day', label: 'За сутки' },
+              { value: '3d', label: 'За 3 дня' },
               { value: 'week', label: 'За неделю' },
               { value: 'month', label: 'За месяц' }
             ]}
           />
-
-          <div className="mini-stat">Избранных: {favorites.length}</div>
         </div>
       </section>
 
@@ -1419,6 +1638,94 @@ function CardsPage({ signals, overview = {}, favorites = [], auth, onToggleFavor
           </button>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function HotnessRadar({ item }) {
+  const metrics = [
+    {
+      key: 'scale_score',
+      label: 'Масштаб',
+      hint: 'Показывает, насколько широко событие может затронуть рынок: от локальной новости до системного изменения.',
+    },
+    {
+      key: 'rigidity_score',
+      label: 'Жёсткость',
+      hint: 'Оценивает силу воздействия: мягкий инфоповод, продуктовые изменения или обязательные правила и ограничения.',
+    },
+    {
+      key: 'urgency_score',
+      label: 'Срочность',
+      hint: 'Показывает, как быстро событие может потребовать внимания: позже, скоро или прямо сейчас.',
+    },
+  ]
+  const size = 220
+  const center = size / 2
+  const maxRadius = 76
+  const points = metrics.map((metric, index) => {
+    const angle = -Math.PI / 2 + index * ((Math.PI * 2) / metrics.length)
+    const rawValue = Math.max(0, scoreValue(item?.[metric.key]) ?? 0)
+    const value = Math.min(1, rawValue > 1 ? rawValue / 5 : rawValue)
+    return {
+      ...metric,
+      x: center + Math.cos(angle) * maxRadius * value,
+      y: center + Math.sin(angle) * maxRadius * value,
+      gridX: center + Math.cos(angle) * maxRadius,
+      gridY: center + Math.sin(angle) * maxRadius,
+    }
+  })
+  const polygon = points.map((point) => `${point.x},${point.y}`).join(' ')
+  const grid = points.map((point) => `${point.gridX},${point.gridY}`).join(' ')
+
+  return (
+    <div className="hotness-radar-card">
+      <div className="hotness-radar-head">
+        <div>
+          <h3>Профиль hotness</h3>
+          <p className="muted">Из чего сложилась итоговая оценка новости.</p>
+        </div>
+        <span className={`hotness-total ${hotnessClass(item?.hotness)}`}>{formatHotness(item?.hotness)}</span>
+      </div>
+
+      <div className="hotness-radar-body">
+        <div className="radar-panel">
+          <span className="radar-axis-label radar-axis-top">Масштаб</span>
+          <span className="radar-axis-label radar-axis-left">Срочность</span>
+          <span className="radar-axis-label radar-axis-right">Жёсткость</span>
+          <svg className="hotness-radar" viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Hotness components">
+            <polygon className="radar-grid" points={grid} />
+            {points.map((point) => (
+              <line key={point.key} className="radar-axis" x1={center} y1={center} x2={point.gridX} y2={point.gridY} />
+            ))}
+            <polygon className="radar-shape" points={polygon} />
+            {points.map((point) => (
+              <g key={point.key}>
+                <circle className="radar-dot" cx={point.x} cy={point.y} r="4" />
+              </g>
+            ))}
+          </svg>
+        </div>
+
+        <div className="score-list">
+          {metrics.map((metric) => {
+            const raw = Math.max(0, scoreValue(item?.[metric.key]) ?? 0)
+            const normalized = Math.min(1, raw > 1 ? raw / 5 : raw)
+            return (
+              <div key={metric.key} className="score-explain">
+                <div className="score-explain-top">
+                  <strong>{metric.label}</strong>
+                  <span>{formatScore(item?.[metric.key])}</span>
+                </div>
+                <div className="score-bar">
+                  <i style={{ width: `${Math.round(normalized * 100)}%` }} />
+                </div>
+                <p>{metric.hint}</p>
+              </div>
+            )
+          })}
+        </div>
+      </div>
     </div>
   )
 }
@@ -1477,7 +1784,7 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
         <div>
           <div className="detail-tags">
             <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span>
-            <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span>
+            <span className={`hot-badge ${hotnessClass(item.hotness)}`}>{formatHotness(item.hotness)}</span>
           </div>
           <h1>{item.headline}</h1>
         </div>
@@ -1492,8 +1799,9 @@ function SignalDetailPage({ signals, favorites, auth, onToggleFavorite }) {
       </div>
 
       <div className="detail-grid">
-        <InfoCard title="Кратко" text={item.summary} />
+        <InfoCard title="Информация" text={item.summary} />
         <InfoCard title="Актуальность" text={item.why_now} />
+        <HotnessRadar item={item} />
 
         <div className="info-card sources-card">
           <h3>Источники</h3>
@@ -1534,7 +1842,7 @@ function SignalCard({ item, auth, onToggleFavorite, favorite = false, variant = 
           <span className={`pill ${categoryClass(item.category)}`}>{item.category}</span>
           <h3>{item.headline}</h3>
         </div>
-        <span className={`hot-badge ${hotnessClass(item.hotness)}`}>Hotness {item.hotness}</span>
+        <span className={`hot-badge ${hotnessClass(item.hotness)}`}>{formatHotness(item.hotness)}</span>
       </div>
 
       <div className="signal-meta">
@@ -1603,6 +1911,12 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
     setRules(settings.length ? settings : [{ theme: '', source_name: '', hotness_min: '' }])
   }, [settings])
 
+  useEffect(() => {
+    if (!notice) return undefined
+    const timer = window.setTimeout(() => setNotice(''), 3200)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
   const topicOptions = useMemo(() => {
     const values = new Set(overview.category_options || [])
     ;(rules || []).forEach((rule) => {
@@ -1655,7 +1969,7 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
     setNotice('')
     try {
       await onSaveSettings(clean)
-      setNotice(clean.length ? 'Правила сохранены. Новые уведомления будут приходить по ним.' : 'Правила очищены. Новые сигналы будут приходить без фильтров.')
+      setNotice(clean.length ? 'Правила сохранены. Новые уведомления будут приходить по ним.' : 'Правила очищены. Уведомления не будут приходить, пока не добавите правило.')
     } catch (error) {
       setNotice(error.message)
     } finally {
@@ -1698,7 +2012,7 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
     <div className="stack">
       <section className="card page-head">
         <h1>Уведомления</h1>
-        <p>Настройте правила для новых сигналов. Каждое правило работает отдельно: если новость подходит хотя бы под одно, она попадёт в ленту.</p>
+        <p>Настрой ленту новых сигналов: можно оставить одно правило или собрать несколько независимых фильтров.</p>
         <div className="notification-stats">
           <div className="mini-stat">Правил: {settings.length}</div>
           <div className="mini-stat">Новых: {unreadTotal}</div>
@@ -1709,10 +2023,10 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
       <section className="card notification-settings-card">
         <div className="section-head">
           <div>
-            <h2>Правила уведомлений</h2>
-            <p className="muted">Категории и источники подтягиваются из текущей базы. Пустое поле означает, что ограничение не применяется.</p>
+            <h2>Когда уведомлять</h2>
+            <p className="muted">Пустое поле означает “любой вариант”. Уведомления появляются только для новых карточек после сохранения правил.</p>
           </div>
-          <button className="button ghost" onClick={addRule}>Добавить правило</button>
+          <button className="button ghost" onClick={addRule}>+ правило</button>
         </div>
 
         <div className="rules-list">
@@ -1764,8 +2078,8 @@ function NotificationsPage({ auth, overview = {}, notifications, settings, onSav
       <section className="card notification-feed-card">
         <div className="section-head">
           <div>
-            <h2>Лента</h2>
-            <p className="muted">Здесь появляются только новые карточки после обновления базы.</p>
+            <h2>Новые сигналы</h2>
+            <p className="muted">Непрочитанные подсвечиваются. Клик по уведомлению открывает карточку.</p>
           </div>
           <button className="button ghost" onClick={clearAllNotifications} disabled={clearing || !notifications.length}>
             {clearing ? 'Очищаю...' : 'Очистить'}
