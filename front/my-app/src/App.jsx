@@ -1165,8 +1165,9 @@ function TopBar({ auth, onLogout, unreadCount = 0 }) {
 function Footer() {
   return (
     <footer className="footer">
-      <span>Red Cat Trendwatcher</span>
-      <span>React + Flask + SQLAlchemy</span>
+      <span>Red Cat FinTech TrendWatcher</span>
+      <span>Release version 2.0</span>
+      <span>Forced by Red Cat HackItOn Team</span>
     </footer>
   )
 }
@@ -1305,10 +1306,64 @@ function HomePage({ signals, overview = {}, favorites = [], auth, onToggleFavori
 function AboutPage() {
   return (
     <div className="stack">
-      <section className="card page-head placeholder-page">
-        <h1>Данная страница еще в разработке</h1>
-        <p>Скоро здесь появится описание проекта, команды и материалов.</p>
-        <img className="placeholder-cat" src="/working-cat.svg" alt="Страница в разработке" />
+      <section className="card about-hero">
+        <div>
+          <h1>Опережай тренды. Управляй будущим.</h1>
+          <p>Учебный проект в рамках хакатона Альфа-Банка для Лицея НИУ ВШЭ. Мы собираем финансовые новости, очищаем шум и превращаем поток публикаций в понятные сигналы для продуктовых и аналитических команд.</p>
+        </div>
+        <img className="about-cat" src="/working-cat.svg" alt="Red Cat Trendwatcher" />
+      </section>
+
+      <section className="about-grid">
+        <div className="card about-card">
+          <span>01</span>
+          <h2>Проблема</h2>
+          <p>Финансовый рынок меняется быстрее, чем команда успевает читать источники. Важные регуляторные, продуктовые и конкурентные сигналы легко теряются среди PR, дублей и фоновых отчётов.</p>
+        </div>
+        <div className="card about-card">
+          <span>02</span>
+          <h2>Решение</h2>
+          <p>Red Cat собирает публикации из СМИ, официальных сайтов и Telegram, нормализует текст, ищет дубли и оценивает важность события через модели.</p>
+        </div>
+        <div className="card about-card">
+          <span>03</span>
+          <h2>Результат</h2>
+          <p>На витрине остаются короткие карточки: что произошло, почему это важно, насколько событие масштабно, срочно и жёстко влияет на рынок.</p>
+        </div>
+      </section>
+
+      <section className="card about-flow-card">
+        <div className="section-head">
+          <div>
+            <h2>Как работает пайплайн</h2>
+            <p className="muted">От сырой новости до готового сигнала на витрине.</p>
+          </div>
+        </div>
+        <div className="about-flow">
+          {[
+            ['Parser', 'собирает публикации'],
+            ['LLM', 'делает заголовок, summary и актуальность'],
+            ['Models', 'определяют fintech и профиль hotness'],
+            ['Dedup', 'склеивает повторы'],
+            ['Frontend', 'показывает карточки, дайджесты и избранное'],
+          ].map(([title, text]) => (
+            <div className="about-flow-step" key={title}>
+              <strong>{title}</strong>
+              <span>{text}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="about-grid two">
+        <div className="card about-card">
+          <h2>Для кого</h2>
+          <p>Для команд, которым нужно быстро понимать, какие новости могут повлиять на продукты, платежи, риски, комплаенс, конкурентов и клиентский опыт.</p>
+        </div>
+        <div className="card about-card">
+          <h2>Что дальше</h2>
+          <p>Развиваем качество моделей, новые источники и продвинутые уведомления (push), чтобы сервис был не просто новостной лентой, а полноценным рабочим инструментом.</p>
+        </div>
       </section>
     </div>
   )
@@ -1361,7 +1416,7 @@ function DigestsPage() {
     <div className="stack">
       <section className="card page-head">
         <h1>Дайджесты</h1>
-        <p>Краткая недельная сводка по главным финтех-сигналам без дублей.</p>
+        <p>Краткая недельная сводка по главным финтех-сигналам.</p>
       </section>
 
       {error ? <div className="card center-card">{error}</div> : null}
@@ -1409,30 +1464,149 @@ function DigestCard({ digest }) {
 }
 
 function DigestText({ text }) {
-  const blocks = String(text || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
+  const sections = compactDigestSections(parseDigestReport(text))
 
-  if (!blocks.length) return null
+  if (!sections.length) return null
 
   return (
-    <div className="digest-report">
-      {blocks.map((line, index) => {
-        const normalized = cleanDigestLine(line.replace(/^[-*]\s+/, '').replace(/^\d+\.\s+/, ''))
-        if (/^#{1,3}\s+/.test(line)) {
-          return <h3 key={index}>{cleanDigestLine(line.replace(/^#{1,3}\s+/, ''))}</h3>
-        }
-        if (/^\d+\.\s+/.test(line) || /^[-*]\s+/.test(line)) {
-          return <p key={index} className="digest-bullet">{normalized}</p>
-        }
-        if (line.endsWith(':') && line.length < 90) {
-          return <h3 key={index}>{cleanDigestLine(line.replace(/:$/, ''))}</h3>
-        }
-        return <p key={index}>{cleanDigestLine(line)}</p>
-      })}
+    <div className="digest-report compact">
+      {sections.map((section, index) => (
+        <section className="digest-compact-section" key={`${section.title}-${index}`}>
+          {section.title ? <h3>{section.title}</h3> : null}
+          <div className="digest-compact-grid">
+            <div className="digest-compact-block happened">
+              <span>Что случилось</span>
+              {section.happened.length ? (
+                <ul>{section.happened.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul>
+              ) : <p>Ключевые события собраны в выводах.</p>}
+            </div>
+            <div className="digest-compact-block consequence">
+              <span>Возможные последствия</span>
+              {section.consequences.length ? (
+                <ul>{section.consequences.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul>
+              ) : <p>Явных последствий в дайджесте не выделено.</p>}
+            </div>
+          </div>
+        </section>
+      ))}
     </div>
   )
+}
+
+function parseDigestReport(text) {
+  const lines = String(text || '')
+    .split('\n')
+    .map((line) => cleanDigestLine(line))
+    .filter(Boolean)
+  const sections = []
+  let current = null
+  let activeBlock = null
+
+  const ensureSection = () => {
+    if (!current) {
+      current = { title: '', blocks: [] }
+      sections.push(current)
+    }
+    return current
+  }
+
+  const startBlock = (label) => {
+    const section = ensureSection()
+    activeBlock = {
+      label,
+      kind: digestBlockKind(label),
+      items: [],
+      text: '',
+    }
+    section.blocks.push(activeBlock)
+  }
+
+  lines.forEach((line) => {
+    if (/^#{1,3}\s+/.test(line)) {
+      current = { title: line.replace(/^#{1,3}\s+/, '').trim(), blocks: [] }
+      sections.push(current)
+      activeBlock = null
+      return
+    }
+
+    const normalizedTitle = line.replace(/:$/, '')
+    if (isDigestBlockTitle(normalizedTitle)) {
+      startBlock(normalizedTitle)
+      return
+    }
+
+    const bulletMatch = line.match(/^[-*•]\s+(.+)$/) || line.match(/^\d+\.\s+(.+)$/)
+    if (bulletMatch) {
+      if (!activeBlock) startBlock('Ключевые факты')
+      activeBlock.items.push(cleanDigestLine(bulletMatch[1]))
+      return
+    }
+
+    if (!activeBlock) startBlock('')
+    activeBlock.text = activeBlock.text ? `${activeBlock.text} ${line}` : line
+  })
+
+  return sections
+    .map((section) => ({
+      ...section,
+      blocks: section.blocks.filter((block) => block.label || block.text || block.items.length),
+    }))
+    .filter((section) => section.title || section.blocks.length)
+}
+
+function compactDigestSections(sections) {
+  return sections.map((section) => {
+    const happened = []
+    const consequences = []
+    section.blocks.forEach((block) => {
+      const values = [
+        ...(block.items || []),
+        ...(block.text ? [block.text] : []),
+      ].map(cleanDigestLine).filter(Boolean)
+      if (!values.length) return
+      if (['Что произошло', 'Ключевые факты', ''].includes(block.label)) {
+        happened.push(...values)
+      } else {
+        consequences.push(...values)
+      }
+    })
+    return {
+      title: section.title,
+      happened: uniqueDigestItems(happened).slice(0, 4),
+      consequences: uniqueDigestItems(consequences).slice(0, 4),
+    }
+  }).filter((section) => section.title || section.happened.length || section.consequences.length)
+}
+
+function uniqueDigestItems(items) {
+  const seen = new Set()
+  const result = []
+  items.forEach((item) => {
+    const key = item.toLowerCase()
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    result.push(item)
+  })
+  return result
+}
+
+function isDigestBlockTitle(line) {
+  return [
+    'Что произошло',
+    'Почему важно для банка',
+    'Риски',
+    'Что учесть',
+    'Ключевые факты',
+    'Итог недели',
+  ].includes(line)
+}
+
+function digestBlockKind(label) {
+  if (label === 'Почему важно для банка') return 'meaning'
+  if (label === 'Риски') return 'risk'
+  if (label === 'Что учесть') return 'action'
+  if (label === 'Итог недели') return 'final'
+  return ''
 }
 
 function cleanDigestLine(line) {

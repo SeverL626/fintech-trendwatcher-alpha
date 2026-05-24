@@ -1356,9 +1356,9 @@ def get_user_notification_cutoff(user: User):
 
 def signal_notification_time(signal):
     return parse_datetime(
-        signal.get("signal_created_at")
+        signal.get("published_at")
         or signal.get("created_at")
-        or signal.get("published_at")
+        or signal.get("signal_created_at")
     )
 
 
@@ -1783,6 +1783,7 @@ def create_app(test_config=None):
         rules = data.get("rules") or []
 
         NotificationSetting.query.filter_by(user_id=user.id).delete()
+        NotificationItem.query.filter_by(user_id=user.id).delete()
 
         for rule in rules:
             theme = (rule.get("theme") or "").strip()
