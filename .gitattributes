@@ -1,0 +1,2 @@
+data/app.db filter=lfs diff=lfs merge=lfs -text
+data/redcat.db filter=lfs diff=lfs merge=lfs -text
