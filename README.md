@@ -2,22 +2,24 @@
 
 Сервис трендвотчера для финтех-публикаций: парсер собирает новости, модель OpenRouter превращает их в карточки сигналов, дедупликатор склеивает повторы, фронт показывает готовую витрину.
 
-Проект законсервирован как рабочий снапшот: актуальные базы `data/app.db` и `data/redcat.db` хранятся в Git LFS, локальные скрипты и backup-файлы не входят в поставку. Короткая инструкция запуска и восстановления лежит в [CONSERVATION.md](CONSERVATION.md).
+> Проект законсервирован, актуальные базы `data/app.db` и `data/redcat.db` хранятся в Git LFS. Короткая инструкция запуска и восстановления лежит в [CONSERVATION.md](CONSERVATION.md).
 
  ## Admin access + /update/status
 
 - manager@redcat.tu
 - rqbqerj1543tgjkq
 
-> https://redcat-news.ru/update/status?token=rqbqerj1543tgjkq
+>PROD: ```https://redcat-news.ru/update/status?token=<SET_IT>```
 
-## Быстрый Запуск
+>LOCAL: ```https://redcat-news.ru/update/status```
+
+## Запуск
 
 Локально через Docker:
 
 ```powershell
 copy .env.example .env
-# заполнить OPENROUTER_API_KEY в .env
+# OPENROUTER_API_KEY в .env
 docker compose up -d --build
 ```
 
@@ -46,7 +48,7 @@ POST /api/update           # запуск полного update из frontend
 POST /api/admin/update     # совместимый endpoint кнопки обновления
 ```
 
-Frontend также использует совместимые endpoints для demo-аккаунта, избранного и уведомлений (`/api/login`, `/api/me`, `/api/favorites`, `/api/notifications`). Реальные данные для витрины идут из `/api/signals` и `/api/market`.
+Также `/api/login`, `/api/me`, `/api/favorites`, `/api/notifications`.
 
 ## Update Pipeline
 
