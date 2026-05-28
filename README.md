@@ -2,7 +2,7 @@
 
 Сервис трендвотчера для финтех-публикаций: парсер собирает новости, модель OpenRouter превращает их в карточки сигналов, дедупликатор склеивает повторы, фронт показывает готовую витрину.
 
-> Проект законсервирован, актуальные базы `data/app.db` и `data/redcat.db` хранятся в Git LFS. Короткая инструкция запуска и восстановления лежит в [CONSERVATION.md](CONSERVATION.md).
+> Проект законсервирован, актуальные базы `data/app.db` и `data/redcat.db` хранятся в Git LFS.
 
  ## Admin access + /update/status
 
@@ -13,13 +13,22 @@
 
 >LOCAL: ```https://redcat-news.ru/update/status```
 
-## Запуск
+## Start
 
-Локально через Docker:
+В `.env` задать:
+
+```env
+OPENROUTER_API_KEY=sk-or-v1-...
+JWT_SECRET_KEY=<long-random-string>
+UPDATE_STATUS_TOKEN=<status-token>
+BACKEND_PORT=5000
+FRONT_BACKEND_PORT=5001
+FRONTEND_PORT=5173
+```
+
+Docker:
 
 ```powershell
-copy .env.example .env
-# OPENROUTER_API_KEY в .env
 docker compose up -d --build
 ```
 
@@ -31,11 +40,7 @@ backend:  http://localhost:5000
 frontend-backend: http://localhost:5001
 ```
 
-Vite dev server проксирует `/api` на `http://127.0.0.1:5001`, а `/update` и `/signals` на `http://127.0.0.1:5000`.
-
 ## API
-
-Основные endpoints (`/api/*` обслуживает `frontend-backend`, update pipeline живет в `backend`):
 
 ```text
 GET  /                     # настройки сервиса и update
@@ -48,7 +53,7 @@ POST /api/update           # запуск полного update из frontend
 POST /api/admin/update     # совместимый endpoint кнопки обновления
 ```
 
-Также `/api/login`, `/api/me`, `/api/favorites`, `/api/notifications`.
+А также: `/api/login`, `/api/me`, `/api/favorites`, `/api/notifications`.
 
 ## Update Pipeline
 
@@ -206,8 +211,6 @@ model_status.json
 ```
 
 ## Sources
-
-Стартовый набор создаётся через `python back/init_db.py`.
 
 | ID | Источник | Тип | Коннектор | URL |
 |---:|---|---|---|---|
